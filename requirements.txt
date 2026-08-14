@@ -3,3 +3,6 @@ transformers
 datasets
 numpy
 scikit-learn
+tree-sitter
+tree-sitter-java
+tree-sitter-cpp
