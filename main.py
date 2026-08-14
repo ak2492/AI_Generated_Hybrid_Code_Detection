@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import argparse
 from data_loader import load_code_data
 from semantic_extractor import SemanticExtractor
 from statistical_extractor import StatisticalExtractor
@@ -60,9 +61,12 @@ def run_extraction(language="python", split="train", limit=None, batch_size=4):
     print(f"Extraction complete for {split}. Array shape: {X.shape}")
 
 if __name__ == "__main__":
-    # To run a different language, simply change "python" to "java" or "cpp"
-    TARGET_LANGUAGE = "python"
+    parser = argparse.ArgumentParser(description="Extract features for Hybrid Code Detector")
+    parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"], help="Target programming language")
+    # Added a limit argument so you can easily do trial runs from the command line!
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of samples for testing")
+    args = parser.parse_args()
     
     for dataset_split in ["train", "validation", "test"]:
         print(f"\n--- Processing Split: {dataset_split.upper()} ---")
-        run_extraction(language=TARGET_LANGUAGE, split=dataset_split, limit=None)
+        run_extraction(language=args.language, split=dataset_split, limit=args.limit)
