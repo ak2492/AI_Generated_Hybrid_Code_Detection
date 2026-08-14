@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import joblib
+import argparse
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix
 from torch.utils.data import DataLoader, TensorDataset
 from model import HybridCodeDetector
@@ -9,7 +10,6 @@ def evaluate_model(language="python", batch_size=64):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Initializing {language.upper()} evaluation on {device}...")
     
-    # Load test data, scaler, and model
     X_test = np.load(f"{language}_test_X.npy")
     y_test = np.load(f"{language}_test_y.npy")
     scaler = joblib.load(f"{language}_scaler.pkl")
@@ -36,14 +36,12 @@ def evaluate_model(language="python", batch_size=64):
             all_preds.extend(binary_preds.cpu().numpy())
             all_targets.extend(batch_y.cpu().numpy())
             
-    # Calculate Metrics
     acc = accuracy_score(all_targets, all_preds)
     f1 = f1_score(all_targets, all_preds)
     precision = precision_score(all_targets, all_preds)
     recall = recall_score(all_targets, all_preds)
     auc = roc_auc_score(all_targets, all_probs)
     
-    # Calculate False Positive Rate (FPR)
     tn, fp, fn, tp = confusion_matrix(all_targets, all_preds).ravel()
     fpr = fp / (fp + tn)
     
@@ -56,4 +54,8 @@ def evaluate_model(language="python", batch_size=64):
     print(f"FPR:       {fpr:.4f}")
 
 if __name__ == "__main__":
-    evaluate_model(language="python")
+    parser = argparse.ArgumentParser(description="Evaluate the Hybrid Code Detector")
+    parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"], help="Target programming language")
+    args = parser.parse_args()
+    
+    evaluate_model(language=args.language)
