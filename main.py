@@ -48,7 +48,7 @@ def run_extraction(language="python", split="train", limit=None, batch_size=4):
         
         for _ in batch:
             total_processed += 1
-            if total_processed % 20 == 0:
+            if total_processed % 2000 == 0:
                 print(f"-> Progress: {total_processed} snippets processed.")
                 
         all_auth.append(np.array(batch_auth))
