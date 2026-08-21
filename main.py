@@ -5,8 +5,8 @@ from data_loader import load_code_data
 from semantic_extractor import SemanticExtractor
 from statistical_extractor import StatisticalExtractor
 
-# Import all three parsers
-from authorship_extractor import extract_authorship as extract_python
+# Importing all three symmetrical tree-sitter parsers
+from authorship_python import extract_python_authorship as extract_python
 from authorship_java import extract_java_authorship as extract_java
 from authorship_cpp import extract_cpp_authorship as extract_cpp
 
@@ -23,7 +23,7 @@ def run_extraction(language="python", split="train", limit=None, batch_size=4):
     sem_extractor = SemanticExtractor(device)
     stat_extractor = StatisticalExtractor(device)
     
-    # Route to the correct AST parser
+    # Creating path to the correct AST parser
     if language == "python":
         auth_parser = extract_python
     elif language == "java":
@@ -43,12 +43,12 @@ def run_extraction(language="python", split="train", limit=None, batch_size=4):
         all_sem.append(sem_extractor.extract_batch(batch))
         all_stat.append(stat_extractor.extract_batch(batch))
         
-        # Apply the dynamically routed parser
+        # applying the dynamically routed parser
         batch_auth = [auth_parser(c) for c in batch]
         
         for _ in batch:
             total_processed += 1
-            if total_processed % 2000 == 0:
+            if total_processed % 20 == 0:
                 print(f"-> Progress: {total_processed} snippets processed.")
                 
         all_auth.append(np.array(batch_auth))
@@ -63,7 +63,6 @@ def run_extraction(language="python", split="train", limit=None, batch_size=4):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract features for Hybrid Code Detector")
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"], help="Target programming language")
-    # Added a limit argument so you can easily do trial runs from the command line!
     parser.add_argument("--limit", type=int, default=None, help="Limit number of samples for testing")
     args = parser.parse_args()
     
