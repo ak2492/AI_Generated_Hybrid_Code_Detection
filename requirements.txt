@@ -6,3 +6,4 @@ scikit-learn
 tree-sitter
 tree-sitter-java
 tree-sitter-cpp
+tree-sitter-python
