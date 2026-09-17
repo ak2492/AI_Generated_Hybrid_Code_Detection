@@ -28,16 +28,15 @@ class StatisticalExtractor:
             entropy = -(probs * torch.log(probs + 1e-9)).sum(dim=-1)
             mean_entropy = entropy[:valid_len].mean().item()
             
-            if valid_len > 1:
-                valid_probs = probs[:valid_len-1]
-                target_ids = seq_ids[1:valid_len]
+            if valid_len > 0:
+                # CodeBERT is a Bidirectional MLM. Score aligned indices without causal shift.
+                valid_probs = probs[:valid_len]
+                target_ids = seq_ids[:valid_len]
                 
-                # Vectorized Log-Likelihood
                 target_probs = valid_probs.gather(1, target_ids.unsqueeze(1)).squeeze(1)
                 log_likelihoods = torch.log(target_probs + 1e-9).cpu().numpy()
                 mean_ll = np.mean(log_likelihoods)
                 
-                # Vectorized Rank Calculation
                 sorted_indices = torch.argsort(valid_probs, dim=1, descending=True)
                 ranks = (sorted_indices == target_ids.unsqueeze(1)).nonzero(as_tuple=True)[1] + 1
                 ranks = ranks.cpu().numpy()

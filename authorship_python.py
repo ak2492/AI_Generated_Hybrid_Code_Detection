@@ -3,64 +3,103 @@ import numpy as np
 import tree_sitter_python as tspython
 from tree_sitter import Language, Parser
 
-# Initialize the Tree-sitter Python parser
 PYTHON_LANGUAGE = Language(tspython.language())
 parser = Parser(PYTHON_LANGUAGE)
 
+try:
+    import nltk
+    nltk.download('words', quiet=True)
+    ENGLISH_WORDS = set(nltk.corpus.words.words())
+except:
+    ENGLISH_WORDS = set()
+
 def extract_python_authorship(code):
     features = np.zeros(38)
+    if not code or not str(code).strip(): return features
     
-    # --- Layout Features ---
     lines = code.split('\n')
     total_lines = len(lines)
-    features[0] = total_lines
-    features[1] = sum(1 for line in lines if not line.strip()) / max(total_lines, 1)
-    features[2] = max((len(line) for line in lines), default=0)
-    features[3] = np.mean([len(line) for line in lines]) if lines else 0
+    chars = len(code)
     
-    # --- Lexical Features ---
-    words = re.findall(r'[a-zA-Z_]\w*', code)
-    features[4] = len(words)
-    features[5] = len(set(words)) / max(len(words), 1)
-    features[6] = sum(len(w) for w in words) / max(len(words), 1)
-    features[7] = sum(1 for w in words if re.match(r'^[a-z]+[A-Z][a-zA-Z]*$', w))
-    features[8] = sum(1 for w in words if '_' in w)
-    features[9] = sum(1 for w in words if w.isupper())
+    # Layout Features
+    features[10] = np.mean([len(l) for l in lines]) if lines else 0 
+    features[11] = max([len(l) for l in lines]) if lines else 0 
+    features[12] = sum(1 for l in lines if not l.strip()) / max(total_lines, 1) 
+    features[13] = code.count(' ') / max(chars, 1) 
+    features[14] = 1 if code.startswith('    ') else 0 
+    features[15] = 1 if '):' in code else 0 
     
-    # --- Syntactic Features (Tree-sitter AST) ---
-    # tree-sitter parses raw bytes, bypassing strict Python compilation errors
+    comments = re.findall(r'#.*', code)
+    multi_comments = re.findall(r'\"\"\"[\s\S]*?\"\"\"', code)
+    features[16] = len(comments) / max(total_lines, 1) 
+    features[17] = len(multi_comments) / max(total_lines, 1) 
+    features[18] = (len(comments) + len(multi_comments)) / max(total_lines, 1) 
+    features[19] = np.mean([len(c) for c in comments]) if comments else 0 
+    
+    # Syntactic Features
     tree = parser.parse(bytes(code, "utf8"))
     
-    node_count = 0
-    max_depth = 0
-    loops = 0
-    conditionals = 0
-    functions = 0
-    classes = 0
-    list_comps = 0
+    node_count, max_depth, loops, conditionals, functions, classes = 0, 0, 0, 0, 0, 0
+    cyclomatic, max_nest, list_comps, decorators, oo_patterns = 0, 0, 0, 0, 0
+    switch_match, try_catch, returns, breaks, params, imports = 0, 0, 0, 0, 0, 0
+    
+    var_names, func_names, string_lits = [], [], 0
 
     def traverse(node, depth):
-        nonlocal node_count, max_depth, loops, conditionals, functions, classes, list_comps
+        nonlocal node_count, max_depth, loops, conditionals, functions, classes
+        nonlocal cyclomatic, max_nest, list_comps, decorators, oo_patterns
+        nonlocal switch_match, try_catch, returns, breaks, params, imports, string_lits
+        
         node_count += 1
         max_depth = max(max_depth, depth)
+        ntype = node.type
         
-        node_type = node.type
-        if node_type in ['for_statement', 'while_statement']:
-            loops += 1
-        elif node_type in ['if_statement', 'match_statement']:
-            conditionals += 1
-        elif node_type == 'function_definition':
-            functions += 1
-        elif node_type == 'class_definition':
-            classes += 1
-        elif node_type in ['list_comprehension', 'dictionary_comprehension', 'set_comprehension', 'generator_expression']:
-            list_comps += 1
-            
-        for child in node.children:
-            traverse(child, depth + 1)
+        if ntype in ['for_statement', 'while_statement']: loops += 1; cyclomatic += 1
+        elif ntype in ['if_statement']: conditionals += 1; cyclomatic += 1
+        elif ntype == 'match_statement': switch_match += 1; cyclomatic += 1
+        elif ntype == 'function_definition': functions += 1
+        elif ntype == 'class_definition': classes += 1; oo_patterns += 1
+        elif ntype == 'try_statement': try_catch += 1
+        elif ntype in ['list_comprehension', 'dictionary_comprehension', 'set_comprehension']: list_comps += 1
+        elif ntype == 'decorator': decorators += 1
+        elif ntype == 'return_statement': returns += 1
+        elif ntype in ['break_statement', 'continue_statement']: breaks += 1
+        elif ntype == 'parameters': params += len(node.children)
+        elif ntype in ['import_statement', 'import_from_statement']: imports += 1
+        elif ntype == 'string': string_lits += (node.end_byte - node.start_byte)
+        elif ntype == 'identifier':
+            if node.parent and node.parent.type in ['assignment', 'parameters']:
+                var_names.append(code[node.start_byte:node.end_byte])
+            elif node.parent and node.parent.type == 'function_definition':
+                func_names.append(code[node.start_byte:node.end_byte])
+        
+        if ntype == 'block': max_nest = max(max_nest, depth // 2)
+        for child in node.children: traverse(child, depth + 1)
 
     traverse(tree.root_node, 0)
     
-    features[10:17] = [node_count, max_depth, loops, conditionals, functions, classes, list_comps]
+    # Lexical Features
+    features[0] = np.mean([len(n) for n in var_names]) if var_names else 0
+    features[1] = np.mean([len(n) for n in func_names]) if func_names else 0
+    
+    all_names = var_names + func_names
+    if all_names:
+        features[2] = sum(1 for n in all_names if re.match(r'^[a-z]+[A-Z][a-zA-Z]*$', n)) / len(all_names)
+        features[3] = sum(1 for n in all_names if '_' in n) / len(all_names)
+        features[4] = sum(1 for n in all_names if n.isupper()) / len(all_names)
+        features[5] = sum(1 for n in all_names if any(c.isdigit() for c in n)) / len(all_names)
+        if ENGLISH_WORDS:
+            features[36] = sum(1 for n in all_names if n.lower() in ENGLISH_WORDS) / len(all_names)
+    
+    words = re.findall(r'[a-zA-Z_]\w*', code)
+    if words:
+        keywords = {"False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"}
+        features[6] = sum(1 for w in words if w in keywords) / len(words)
+        features[7] = len(set(words)) / len(words)
+        features[8] = np.mean([len(w) for w in words])
+        
+    features[9] = string_lits / max(chars, 1)
+    features[20:36] = [node_count, max_depth, loops, conditionals, functions, classes, cyclomatic, max_nest, list_comps, decorators, oo_patterns, switch_match, try_catch, returns, breaks, params]
+    features[37] = chars
     
     return features
