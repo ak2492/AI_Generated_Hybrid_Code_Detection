@@ -1,12 +1,19 @@
-import sys
-sys.setrecursionlimit(10000)
 import re
+import sys
 import numpy as np
 import tree_sitter_python as tspython
 from tree_sitter import Language, Parser
 
+sys.setrecursionlimit(10000)
 PYTHON_LANGUAGE = Language(tspython.language())
 parser = Parser(PYTHON_LANGUAGE)
+
+try:
+    import nltk
+    nltk.download('words', quiet=True)
+    ENGLISH_WORDS = set(nltk.corpus.words.words())
+except:
+    ENGLISH_WORDS = set()
 
 def extract_python_authorship(code):
     features = np.zeros(38)
@@ -16,7 +23,7 @@ def extract_python_authorship(code):
     total_lines = len(lines)
     chars = len(code)
     
-    # --- Layout Features (Points 1 & 3: Tabs/Spaces, Operator Spacing) ---
+    # 1. Layout Features
     features[10] = np.mean([len(l) for l in lines]) if lines else 0 
     features[11] = max([len(l) for l in lines]) if lines else 0 
     features[12] = sum(1 for l in lines if not l.strip()) / max(total_lines, 1) 
@@ -29,20 +36,31 @@ def extract_python_authorship(code):
     spaced_ops = re.findall(r'\s[=+\-*/<>!&|%^]+\s', code)
     features[15] = len(spaced_ops) / max(1, len(operators))
     
-    comments = re.findall(r'#.*', code)
-    multi_comments = re.findall(r'\"\"\"[\s\S]*?\"\"\"', code)
-    features[16] = len(comments) / max(total_lines, 1) 
-    features[17] = len(multi_comments) / max(total_lines, 1) 
-    features[18] = (len(comments) + len(multi_comments)) / max(total_lines, 1) 
-    features[19] = np.mean([len(c) for c in comments]) if comments else 0 
-    
-    # --- Syntactic Features ---
+    # 2. SINGLE Parse for Comments and Syntax
     tree = parser.parse(bytes(code, "utf8"))
+    
+    c_nodes, bc_nodes = [], []
+    def find_comments(n):
+        if 'comment' in n.type:
+            c_nodes.append(n)
+        # Python specific: docstrings are strings in expression_statements
+        elif n.type == 'string' and n.parent and n.parent.type == 'expression_statement':
+            bc_nodes.append(n)
+        for c in n.children: find_comments(c)
+    find_comments(tree.root_node)
+    
+    features[16] = len(c_nodes) / max(total_lines, 1)
+    features[17] = len(bc_nodes) / max(total_lines, 1)
+    features[18] = (len(c_nodes) + len(bc_nodes)) / max(total_lines, 1)
+    all_c = c_nodes + bc_nodes
+    features[19] = np.mean([n.end_byte - n.start_byte for n in all_c]) if all_c else 0
     
     node_count, max_depth, loops, conditionals, functions, classes = 0, 0, 0, 0, 0, 0
     cyclomatic, max_nest, list_comps, decorators, oo_patterns = 0, 0, 0, 0, 0
     switch_match, try_catch, returns, breaks, params, imports, asserts = 0, 0, 0, 0, 0, 0, 0
     var_names, func_names, string_lits = [], [], 0
+
+    code_bytes = bytes(code, "utf8")
 
     def traverse(node, depth):
         nonlocal node_count, max_depth, loops, conditionals, functions, classes
@@ -69,16 +87,16 @@ def extract_python_authorship(code):
         elif ntype == 'string': string_lits += (node.end_byte - node.start_byte)
         elif ntype == 'identifier':
             if node.parent and node.parent.type in ['assignment', 'parameters', 'for_statement', 'with_statement', 'except_clause', 'ann_assign']:
-                var_names.append(bytes(code, 'utf8')[node.start_byte:node.end_byte].decode('utf8', errors='ignore'))
+                var_names.append(code_bytes[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
             elif node.parent and node.parent.type == 'function_definition':
-                func_names.append(bytes(code, 'utf8')[node.start_byte:node.end_byte].decode('utf8', errors='ignore'))
+                func_names.append(code_bytes[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
         
         if ntype == 'block': max_nest = max(max_nest, depth // 2)
         for child in node.children: traverse(child, depth + 1)
 
     traverse(tree.root_node, 0)
     
-    # --- Lexical Features (Point 2: Complete Keyword Set) ---
+    # 3. Lexical Features
     features[0] = np.mean([len(n) for n in var_names]) if var_names else 0
     features[1] = np.mean([len(n) for n in func_names]) if func_names else 0
     
@@ -88,6 +106,8 @@ def extract_python_authorship(code):
         features[3] = sum(1 for n in all_names if '_' in n) / len(all_names)
         features[4] = sum(1 for n in all_names if n.isupper()) / len(all_names)
         features[5] = sum(1 for n in all_names if any(c.isdigit() for c in n)) / len(all_names)
+        if ENGLISH_WORDS:
+            features[36] = sum(1 for n in all_names if n.lower() in ENGLISH_WORDS) / len(all_names)
     
     words = re.findall(r'[a-zA-Z_]\w*', code)
     if words:
@@ -97,8 +117,7 @@ def extract_python_authorship(code):
         features[8] = np.mean([len(w) for w in words])
         
     features[9] = string_lits / max(chars, 1)
-    
-    # Point 1: Map imports and explicitly match 38 dimension array limits
-    features[20:38] = [node_count, max_depth, loops, conditionals, functions, classes, cyclomatic, max_nest, list_comps, decorators, oo_patterns, switch_match, try_catch, returns, breaks, params, imports, asserts]
+    features[20:36] = [node_count, max_depth, loops, conditionals, functions, classes, cyclomatic, max_nest, list_comps, decorators, oo_patterns, switch_match, try_catch, returns, breaks, params]
+    features[37] = chars
     
     return features
