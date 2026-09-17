@@ -29,12 +29,20 @@ def extract_cpp_authorship(code):
     spaced_ops = re.findall(r'\s[=+\-*/<>!&|%^]+\s', code)
     features[15] = len(spaced_ops) / max(1, len(operators))
     
-    comments = re.findall(r'//.*', code)
-    multi_comments = re.findall(r'/\*[\s\S]*?\*/', code)
-    features[16] = len(comments) / max(total_lines, 1)
-    features[17] = len(multi_comments) / max(total_lines, 1) 
-    features[18] = (len(comments) + len(multi_comments)) / max(total_lines, 1) 
-    features[19] = np.mean([len(c) for c in comments]) if comments else 0 
+    # AST Comment Extraction
+    tree = parser.parse(bytes(code, "utf8"))
+    c_nodes, bc_nodes = [], []
+    def find_c(n):
+        if n.type in ['comment', 'line_comment']: c_nodes.append(bytes(code, "utf8")[n.start_byte:n.end_byte])
+        elif n.type == 'block_comment' or (n.type == 'string' and n.parent and n.parent.type == 'expression_statement'): bc_nodes.append(bytes(code, "utf8")[n.start_byte:n.end_byte])
+        for c in n.children: find_c(c)
+    find_c(tree.root_node)
+    
+    features[16] = len(c_nodes) / max(total_lines, 1)
+    features[17] = len(bc_nodes) / max(total_lines, 1)
+    features[18] = (len(c_nodes) + len(bc_nodes)) / max(total_lines, 1)
+    all_c = c_nodes + bc_nodes
+    features[19] = np.mean([len(c) for c in all_c]) if all_c else 0 
     
     # --- Syntactic Features ---
     tree = parser.parse(bytes(code, "utf8"))

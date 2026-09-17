@@ -1,7 +1,7 @@
 import os
 import warnings
 
-# 1. Suppress Hugging Face Safetensors threading and structural warnings
+# Suppress Hugging Face Safetensors threading and structural warnings
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 warnings.filterwarnings("ignore")
@@ -31,6 +31,12 @@ from model import HybridCodeDetector
 from authorship_python import extract_python_authorship
 from authorship_java import extract_java_authorship
 from authorship_cpp import extract_cpp_authorship
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
 
 # =====================================================================================
 # CROSS-LANGUAGE AST OBFUSCATION CONFIGURATIONS
@@ -123,7 +129,6 @@ def get_attacked_corpus(codes, labels, attack_type, language):
     
     sem_codes, stat_codes, auth_codes = [], [], []
     
-    # Restored interactive TQDM progress bar for synthesis
     for c, l in tqdm(zip(codes, labels), total=len(codes), desc=f"Synthesizing {attack_type.upper()} Samples", unit="snippet", leave=True):
         c_sem, c_stat, c_auth = c, c, c
         if l == 1:
@@ -159,14 +164,12 @@ def evaluate_attack(language, attack_type, limit, batch_size):
         
     sem_extractor = SemanticExtractor(device)
     all_sem = []
-    # Restored CodeT5+ Tracker
     for i in tqdm(range(0, len(sem_codes), batch_size), desc="Extracting CodeT5+ Embeddings", unit="batch", leave=True):
         all_sem.append(sem_extractor.extract_batch(sem_codes[i : i + batch_size]))
     del sem_extractor; torch.cuda.empty_cache(); gc.collect()
     
     stat_extractor = StatisticalExtractor(device)
     all_stat = []
-    # Restored CodeBERT Tracker
     for i in tqdm(range(0, len(stat_codes), batch_size), desc="Extracting CodeBERT Metrics", unit="batch", leave=True):
         all_stat.append(stat_extractor.extract_batch(stat_codes[i : i + batch_size]))
     del stat_extractor; torch.cuda.empty_cache(); gc.collect()
@@ -176,7 +179,6 @@ def evaluate_attack(language, attack_type, limit, batch_size):
     elif language == "cpp": auth_parser = extract_cpp_authorship
     
     with Pool(processes=cpu_count()) as pool:
-        # Restored AST Parser Tracker
         all_auth_flat = list(tqdm(pool.imap(auth_parser, auth_codes), total=len(auth_codes), desc=f"Parsing AST Features ({cpu_count()} CPU Threads)", leave=True))
         
     X_test = np.hstack((np.vstack(all_sem), np.vstack(all_stat), np.array(all_auth_flat)))
@@ -184,7 +186,7 @@ def evaluate_attack(language, attack_type, limit, batch_size):
     X_scaled = scaler.transform(X_test)
     
     model = HybridCodeDetector().to(device)
-    model.load_state_dict(torch.load(f"{language}_best_model.pt"))
+    model.load_state_dict(torch.load(f"{language}_best_model.pt", map_location=device))
     model.eval()
     
     with torch.no_grad():
@@ -211,5 +213,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32)
     args = parser.parse_args()
     
+    set_seed(42)
     for attack in ["clean", "auth", "stat", "sem", "full"]:
         evaluate_attack(args.language, attack, args.limit, args.batch_size)

@@ -12,8 +12,5 @@ class SemanticExtractor:
         inputs = self.tokenizer(codes, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
         with torch.no_grad():
             outputs = self.model(**inputs)
-        # Mean pooling across valid tokens instead of arbitrary [:, 0, :] extraction
-        mask = inputs['attention_mask'].unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
-        sum_embeddings = torch.sum(outputs.last_hidden_state * mask, dim=1)
-        sum_mask = torch.clamp(mask.sum(dim=1), min=1e-9)
-        return (sum_embeddings / sum_mask).cpu().numpy()
+        # Reverted to literal [CLS] (first token) extraction to match Paper Sec. 3.1.3
+        return outputs.last_hidden_state[:, 0, :].cpu().numpy()
