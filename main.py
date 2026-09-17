@@ -3,6 +3,7 @@ import numpy as np
 import argparse
 import gc
 from multiprocessing import Pool, cpu_count
+from tqdm.auto import tqdm
 from data_loader import load_code_data
 from semantic_extractor import SemanticExtractor
 from statistical_extractor import StatisticalExtractor
@@ -12,7 +13,7 @@ from authorship_cpp import extract_cpp_authorship as extract_cpp
 
 def run_extraction(language="python", split="train", limit=None, sem_batch=32, stat_batch=32):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Initializing {language.upper()} decoupled pipeline for {split} split on {device}...")
+    print(f"\nInitializing {language.upper()} decoupled pipeline for {split} split on {device}...")
     
     codes, labels = load_code_data(language=language, split=split, limit=limit)
     if len(codes) == 0:
@@ -30,7 +31,7 @@ def run_extraction(language="python", split="train", limit=None, sem_batch=32, s
     # Phase 1: Semantic Extraction (CodeT5+)
     print("Phase 1: Running Semantic Extraction...")
     sem_extractor = SemanticExtractor(device)
-    for i in range(0, len(codes), sem_batch):
+    for i in tqdm(range(0, len(codes), sem_batch), desc="CodeT5+ Batches", unit="batch"):
         batch = codes[i : i + sem_batch]
         all_sem.append(sem_extractor.extract_batch(batch))
     
@@ -42,7 +43,7 @@ def run_extraction(language="python", split="train", limit=None, sem_batch=32, s
     # Phase 2: Statistical Extraction (CodeBERT)
     print("Phase 2: Running Statistical Extraction...")
     stat_extractor = StatisticalExtractor(device)
-    for i in range(0, len(codes), stat_batch):
+    for i in tqdm(range(0, len(codes), stat_batch), desc="CodeBERT Batches", unit="batch"):
         batch = codes[i : i + stat_batch]
         all_stat.append(stat_extractor.extract_batch(batch))
         
@@ -54,7 +55,8 @@ def run_extraction(language="python", split="train", limit=None, sem_batch=32, s
     # Phase 3: Authorship Extraction (Tree-sitter via Multiprocessing)
     print(f"Phase 3: Running AST Parsing across {cpu_count()} CPU cores...")
     with Pool(processes=cpu_count()) as pool:
-        all_auth_flat = pool.map(auth_parser, codes)
+        # Using imap instead of map allows tqdm to track asynchronous progress
+        all_auth_flat = list(tqdm(pool.imap(auth_parser, codes), total=len(codes), desc="AST Parsing", unit="snippet"))
     all_auth = [np.array(all_auth_flat)]
     
     # Final Matrix Assembly
