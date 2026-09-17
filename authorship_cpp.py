@@ -8,13 +8,6 @@ sys.setrecursionlimit(10000)
 CPP_LANGUAGE = Language(tscpp.language())
 parser = Parser(CPP_LANGUAGE)
 
-try:
-    import nltk
-    nltk.download('words', quiet=True)
-    ENGLISH_WORDS = set(nltk.corpus.words.words())
-except:
-    ENGLISH_WORDS = set()
-
 def extract_cpp_authorship(code):
     features = np.zeros(38)
     if not code or not str(code).strip(): return features
@@ -23,7 +16,7 @@ def extract_cpp_authorship(code):
     total_lines = len(lines)
     chars = len(code)
     
-    # 1. Layout Features
+    # 1. Layout Features (Dimensions 10-19)
     features[10] = np.mean([len(l) for l in lines]) if lines else 0 
     features[11] = max([len(l) for l in lines]) if lines else 0 
     features[12] = sum(1 for l in lines if not l.strip()) / max(total_lines, 1) 
@@ -37,7 +30,8 @@ def extract_cpp_authorship(code):
     features[15] = len(spaced_ops) / max(1, len(operators))
     
     # 2. SINGLE Parse for Comments and Syntax
-    tree = parser.parse(bytes(code, "utf8"))
+    code_bytes_raw = bytes(code, "utf8")
+    tree = parser.parse(code_bytes_raw)
     
     c_nodes, bc_nodes = [], []
     def find_comments(n):
@@ -56,9 +50,7 @@ def extract_cpp_authorship(code):
     node_count, max_depth, loops, conditionals, functions, classes = 0, 0, 0, 0, 0, 0
     cyclomatic, max_nest, lambdas, macros, oo_patterns = 0, 0, 0, 0, 0
     switch_match, try_catch, returns, breaks, params, imports, asserts = 0, 0, 0, 0, 0, 0, 0
-    var_names, func_names, string_lits = [], 0, 0
-
-    code_bytes = bytes(code, "utf8")
+    var_names, func_names, string_lits = [], [], 0
 
     def traverse(node, depth):
         nonlocal node_count, max_depth, loops, conditionals, functions, classes
@@ -86,16 +78,16 @@ def extract_cpp_authorship(code):
         elif ntype == 'string_literal': string_lits += (node.end_byte - node.start_byte)
         elif ntype == 'identifier':
             if node.parent and node.parent.type in ['init_declarator', 'parameter_declaration', 'declaration', 'for_range_loop']:
-                var_names.append(code_bytes[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
+                var_names.append(code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
             elif node.parent and node.parent.type == 'function_declarator':
-                func_names.append(code_bytes[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
+                func_names.append(code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
         
         if ntype == 'compound_statement': max_nest = max(max_nest, depth // 2)
         for child in node.children: traverse(child, depth + 1)
 
     traverse(tree.root_node, 0)
     
-    # 3. Lexical Features
+    # 3. Lexical Features (Dimensions 0-9)
     features[0] = np.mean([len(n) for n in var_names]) if var_names else 0
     features[1] = np.mean([len(n) for n in func_names]) if func_names else 0
     
@@ -105,8 +97,6 @@ def extract_cpp_authorship(code):
         features[3] = sum(1 for n in all_names if '_' in n) / len(all_names)
         features[4] = sum(1 for n in all_names if n.isupper()) / len(all_names)
         features[5] = sum(1 for n in all_names if any(c.isdigit() for c in n)) / len(all_names)
-        if ENGLISH_WORDS:
-            features[36] = sum(1 for n in all_names if n.lower() in ENGLISH_WORDS) / len(all_names)
     
     words = re.findall(r'[a-zA-Z_]\w*', code)
     if words:
@@ -116,6 +106,8 @@ def extract_cpp_authorship(code):
         features[8] = np.mean([len(w) for w in words])
         
     features[9] = string_lits / max(chars, 1)
+    
+    # 4. Syntactic Features (Dimensions 20-37 - Fully populated 18 slots)
     features[20:38] = [node_count, max_depth, loops, conditionals, functions, classes, cyclomatic, max_nest, lambdas, macros, oo_patterns, switch_match, try_catch, returns, breaks, params, imports, asserts]
     
     return features
