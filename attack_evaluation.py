@@ -1,3 +1,14 @@
+import os
+import warnings
+
+# 1. Suppress Hugging Face Safetensors threading and structural warnings
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+warnings.filterwarnings("ignore")
+
+import transformers
+transformers.logging.set_verbosity_error()
+
 import argparse
 import random
 import numpy as np
@@ -20,6 +31,10 @@ from model import HybridCodeDetector
 from authorship_python import extract_python_authorship
 from authorship_java import extract_java_authorship
 from authorship_cpp import extract_cpp_authorship
+
+# =====================================================================================
+# CROSS-LANGUAGE AST OBFUSCATION CONFIGURATIONS
+# =====================================================================================
 
 def get_language_config(language):
     if language == "python":
@@ -108,7 +123,8 @@ def get_attacked_corpus(codes, labels, attack_type, language):
     
     sem_codes, stat_codes, auth_codes = [], [], []
     
-    for c, l in zip(codes, labels):
+    # Restored interactive TQDM progress bar for synthesis
+    for c, l in tqdm(zip(codes, labels), total=len(codes), desc=f"Synthesizing {attack_type.upper()} Samples", unit="snippet", leave=True):
         c_sem, c_stat, c_auth = c, c, c
         if l == 1:
             if attack_type in ["sem", "full"]:
@@ -139,30 +155,29 @@ def evaluate_attack(language, attack_type, limit, batch_size):
     codes, labels = load_code_data(language=language, split="test", limit=limit)
     if not codes: return
 
-    # Point 7: Attack Isolation Protocol
     sem_codes, stat_codes, auth_codes = get_attacked_corpus(codes, labels, attack_type, language)
         
-    print("Extracting CodeT5+ Semantic Embeddings...")
     sem_extractor = SemanticExtractor(device)
     all_sem = []
-    for i in tqdm(range(0, len(sem_codes), batch_size), desc="CodeT5+", unit="batch"):
+    # Restored CodeT5+ Tracker
+    for i in tqdm(range(0, len(sem_codes), batch_size), desc="Extracting CodeT5+ Embeddings", unit="batch", leave=True):
         all_sem.append(sem_extractor.extract_batch(sem_codes[i : i + batch_size]))
     del sem_extractor; torch.cuda.empty_cache(); gc.collect()
     
-    print("Extracting CodeBERT Statistical Metrics...")
     stat_extractor = StatisticalExtractor(device)
     all_stat = []
-    for i in tqdm(range(0, len(stat_codes), batch_size), desc="CodeBERT", unit="batch"):
+    # Restored CodeBERT Tracker
+    for i in tqdm(range(0, len(stat_codes), batch_size), desc="Extracting CodeBERT Metrics", unit="batch", leave=True):
         all_stat.append(stat_extractor.extract_batch(stat_codes[i : i + batch_size]))
     del stat_extractor; torch.cuda.empty_cache(); gc.collect()
     
-    print(f"Parsing AST Stylometry Features via {cpu_count()} CPU threads...")
     if language == "python": auth_parser = extract_python_authorship
     elif language == "java": auth_parser = extract_java_authorship
     elif language == "cpp": auth_parser = extract_cpp_authorship
     
     with Pool(processes=cpu_count()) as pool:
-        all_auth_flat = list(tqdm(pool.imap(auth_parser, auth_codes), total=len(auth_codes), desc="AST Parsing"))
+        # Restored AST Parser Tracker
+        all_auth_flat = list(tqdm(pool.imap(auth_parser, auth_codes), total=len(auth_codes), desc=f"Parsing AST Features ({cpu_count()} CPU Threads)", leave=True))
         
     X_test = np.hstack((np.vstack(all_sem), np.vstack(all_stat), np.array(all_auth_flat)))
     scaler = joblib.load(f"{language}_scaler.pkl")
