@@ -24,26 +24,31 @@ class StatisticalExtractor:
             valid_len = inputs["attention_mask"][i].sum().item()
             probs = softmax(seq_logits, dim=-1)
             
+            # Vectorized Entropy
             entropy = -(probs * torch.log(probs + 1e-9)).sum(dim=-1)
             mean_entropy = entropy[:valid_len].mean().item()
             
-            log_likelihoods = []
-            ranks = []
-            for j in range(1, valid_len):
-                target_id = seq_ids[j].item()
-                prob_dist = probs[j-1]
-                log_likelihoods.append(torch.log(prob_dist[target_id] + 1e-9).item())
-                sorted_indices = torch.argsort(prob_dist, descending=True)
-                rank = (sorted_indices == target_id).nonzero(as_tuple=True)[0].item() + 1
-                ranks.append(rank)
+            if valid_len > 1:
+                valid_probs = probs[:valid_len-1]
+                target_ids = seq_ids[1:valid_len]
                 
-            mean_ll = np.mean(log_likelihoods) if log_likelihoods else 0
-            mean_log_rank = np.mean(np.log(ranks)) if ranks else 0
-            
-            top_10 = sum(1 for r in ranks if r <= 10) / len(ranks) if ranks else 0
-            top_100 = sum(1 for r in ranks if 10 < r <= 100) / len(ranks) if ranks else 0
-            top_1000 = sum(1 for r in ranks if 100 < r <= 1000) / len(ranks) if ranks else 0
-            others = sum(1 for r in ranks if r > 1000) / len(ranks) if ranks else 0
+                # Vectorized Log-Likelihood
+                target_probs = valid_probs.gather(1, target_ids.unsqueeze(1)).squeeze(1)
+                log_likelihoods = torch.log(target_probs + 1e-9).cpu().numpy()
+                mean_ll = np.mean(log_likelihoods)
+                
+                # Vectorized Rank Calculation
+                sorted_indices = torch.argsort(valid_probs, dim=1, descending=True)
+                ranks = (sorted_indices == target_ids.unsqueeze(1)).nonzero(as_tuple=True)[1] + 1
+                ranks = ranks.cpu().numpy()
+                
+                mean_log_rank = np.mean(np.log(ranks))
+                top_10 = np.sum(ranks <= 10) / len(ranks)
+                top_100 = np.sum((ranks > 10) & (ranks <= 100)) / len(ranks)
+                top_1000 = np.sum((ranks > 100) & (ranks <= 1000)) / len(ranks)
+                others = np.sum(ranks > 1000) / len(ranks)
+            else:
+                mean_ll, mean_log_rank, top_10, top_100, top_1000, others = 0, 0, 0, 0, 0, 0
                 
             batch_stats.append([mean_ll, mean_log_rank, mean_entropy, top_10, top_100, top_1000, others])
             
