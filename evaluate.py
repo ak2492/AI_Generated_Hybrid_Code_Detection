@@ -8,7 +8,7 @@ from model import HybridCodeDetector
 
 def evaluate_model(language="python", batch_size=64):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Initializing {language.upper()} evaluation on {device}...")
+    print(f"Initializing {language.upper()} evaluation on {device} with batch size {batch_size}...")
     
     X_test = np.load(f"{language}_test_X.npy")
     y_test = np.load(f"{language}_test_y.npy")
@@ -56,6 +56,15 @@ def evaluate_model(language="python", batch_size=64):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate the Hybrid Code Detector")
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"], help="Target programming language")
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size for evaluation")
     args = parser.parse_args()
     
-    evaluate_model(language=args.language)
+    if args.batch_size is None:
+        if args.language == "python":
+            args.batch_size = 64
+        elif args.language == "java":
+            args.batch_size = 32
+        elif args.language == "cpp":
+            args.batch_size = 16
+            
+    evaluate_model(language=args.language, batch_size=args.batch_size)

@@ -8,9 +8,10 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from model import HybridCodeDetector
 
-def train_model(language="python", epochs=100, batch_size=64):
+def train_model(language="python", epochs=100, batch_size=64, learning_rate=1e-5):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Initializing {language.upper()} training on {device}...")
+    print(f"Hyperparameters -> Epochs: {epochs} | Batch Size: {batch_size} | LR: {learning_rate}")
     
     X_train = np.load(f"{language}_train_X.npy")
     y_train = np.load(f"{language}_train_y.npy")
@@ -29,7 +30,8 @@ def train_model(language="python", epochs=100, batch_size=64):
     
     model = HybridCodeDetector().to(device)
     criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-5)
+    # Applied dynamic learning rate here
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
     best_val_loss = float('inf')
     
@@ -70,6 +72,18 @@ def train_model(language="python", epochs=100, batch_size=64):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the Hybrid Code Detector")
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"], help="Target programming language")
+    parser.add_argument("--epochs", type=int, default=100, help="Maximum number of epochs")
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size for training")
+    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for Adam optimizer")
     args = parser.parse_args()
     
-    train_model(language=args.language)
+    # Auto-assign paper's specified batch size based on language if left blank
+    if args.batch_size is None:
+        if args.language == "python":
+            args.batch_size = 64
+        elif args.language == "java":
+            args.batch_size = 32
+        elif args.language == "cpp":
+            args.batch_size = 16
+            
+    train_model(language=args.language, epochs=args.epochs, batch_size=args.batch_size, learning_rate=args.learning_rate)
