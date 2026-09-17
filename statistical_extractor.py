@@ -24,21 +24,21 @@ class StatisticalExtractor:
             valid_len = inputs["attention_mask"][i].sum().item()
             probs = softmax(seq_logits, dim=-1)
             
-            # Vectorized Entropy
-            entropy = -(probs * torch.log(probs + 1e-9)).sum(dim=-1)
-            mean_entropy = entropy[:valid_len].mean().item()
-            
-            if valid_len > 0:
-                # CodeBERT is a Bidirectional MLM. Score aligned indices without causal shift.
-                valid_probs = probs[:valid_len]
-                target_ids = seq_ids[:valid_len]
+            # Require at least > 2 to exclude <s> and </s> (CLS/SEP equivalents)
+            if valid_len > 2:
+                # Target inner tokens only
+                inner_probs = probs[1:valid_len-1]
+                inner_ids = seq_ids[1:valid_len-1]
                 
-                target_probs = valid_probs.gather(1, target_ids.unsqueeze(1)).squeeze(1)
+                entropy = -(inner_probs * torch.log(inner_probs + 1e-9)).sum(dim=-1)
+                mean_entropy = entropy.mean().item()
+                
+                target_probs = inner_probs.gather(1, inner_ids.unsqueeze(1)).squeeze(1)
                 log_likelihoods = torch.log(target_probs + 1e-9).cpu().numpy()
                 mean_ll = np.mean(log_likelihoods)
                 
-                sorted_indices = torch.argsort(valid_probs, dim=1, descending=True)
-                ranks = (sorted_indices == target_ids.unsqueeze(1)).nonzero(as_tuple=True)[1] + 1
+                sorted_indices = torch.argsort(inner_probs, dim=1, descending=True)
+                ranks = (sorted_indices == inner_ids.unsqueeze(1)).nonzero(as_tuple=True)[1] + 1
                 ranks = ranks.cpu().numpy()
                 
                 mean_log_rank = np.mean(np.log(ranks))
@@ -47,7 +47,7 @@ class StatisticalExtractor:
                 top_1000 = np.sum((ranks > 100) & (ranks <= 1000)) / len(ranks)
                 others = np.sum(ranks > 1000) / len(ranks)
             else:
-                mean_ll, mean_log_rank, top_10, top_100, top_1000, others = 0, 0, 0, 0, 0, 0
+                mean_ll, mean_log_rank, mean_entropy, top_10, top_100, top_1000, others = 0, 0, 0, 0, 0, 0, 0
                 
             batch_stats.append([mean_ll, mean_log_rank, mean_entropy, top_10, top_100, top_1000, others])
             

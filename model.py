@@ -12,4 +12,5 @@ class HybridCodeDetector(nn.Module):
         )
         
     def forward(self, x):
-        return self.classifier(x).squeeze()
+        # squeeze(-1) prevents squeezing batch size 1 into a 0-d scalar
+        return self.classifier(x).squeeze(-1)

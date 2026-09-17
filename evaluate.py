@@ -8,63 +8,53 @@ from model import HybridCodeDetector
 
 def evaluate_model(language="python", batch_size=64):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Initializing {language.upper()} evaluation on {device} with batch size {batch_size}...")
+    print(f"Evaluating {language.upper()} on {device}...")
     
     X_test = np.load(f"{language}_test_X.npy")
     y_test = np.load(f"{language}_test_y.npy")
     scaler = joblib.load(f"{language}_scaler.pkl")
-    
     X_test_scaled = scaler.transform(X_test)
     test_loader = DataLoader(TensorDataset(torch.FloatTensor(X_test_scaled), torch.FloatTensor(y_test)), batch_size=batch_size, shuffle=False)
     
     model = HybridCodeDetector().to(device)
-    model.load_state_dict(torch.load(f"{language}_best_model.pt"))
+    # Fixed map_location for cross-hardware evaluation
+    model.load_state_dict(torch.load(f"{language}_best_model.pt", map_location=device))
     model.eval()
     
-    all_preds = []
-    all_targets = []
-    all_probs = []
+    all_preds, all_targets, all_probs = [], [], []
     
-    print("Running inference on test split...")
     with torch.no_grad():
         for batch_X, batch_y in test_loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-            probabilities = model(batch_X)
-            binary_preds = (probabilities >= 0.5).float()
+            batch_X = batch_X.to(device)
+            probs = model(batch_X)
+            preds = (probs >= 0.5).float()
             
-            all_probs.extend(probabilities.cpu().numpy())
-            all_preds.extend(binary_preds.cpu().numpy())
-            all_targets.extend(batch_y.cpu().numpy())
+            # Squeeze guarantees flat 1D lists even if batch sizes jitter
+            all_probs.extend(probs.cpu().numpy().flatten())
+            all_preds.extend(preds.cpu().numpy().flatten())
+            all_targets.extend(batch_y.numpy().flatten())
             
     acc = accuracy_score(all_targets, all_preds)
-    f1 = f1_score(all_targets, all_preds)
-    precision = precision_score(all_targets, all_preds)
-    recall = recall_score(all_targets, all_preds)
-    auc = roc_auc_score(all_targets, all_probs)
+    f1 = f1_score(all_targets, all_preds, zero_division=0)
+    prec = precision_score(all_targets, all_preds, zero_division=0)
+    rec = recall_score(all_targets, all_preds, zero_division=0)
+    roc = roc_auc_score(all_targets, all_probs) if len(np.unique(all_targets)) > 1 else 0.0
     
-    tn, fp, fn, tp = confusion_matrix(all_targets, all_preds).ravel()
-    fpr = fp / (fp + tn)
+    # labels=[0,1] prevents crash if the test set only has 1 class
+    tn, fp, fn, tp = confusion_matrix(all_targets, all_preds, labels=[0,1]).ravel()
+    fpr = fp / max(1, fp + tn)
     
     print("\n--- FINAL TEST METRICS ---")
-    print(f"Accuracy:  {acc:.4f}")
-    print(f"F1-Score:  {f1:.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall:    {recall:.4f}")
-    print(f"AUC:       {auc:.4f}")
-    print(f"FPR:       {fpr:.4f}")
+    print(f"Accuracy:  {acc:.4f} | F1-Score: {f1:.4f} | ROC-AUC: {roc:.4f}")
+    print(f"Precision: {prec:.4f} | Recall:   {rec:.4f} | FPR:     {fpr:.4f}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate the Hybrid Code Detector")
-    parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"], help="Target programming language")
-    parser.add_argument("--batch_size", type=int, default=None, help="Batch size for evaluation")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
+    parser.add_argument("--batch_size", type=int, default=None)
     args = parser.parse_args()
     
     if args.batch_size is None:
-        if args.language == "python":
-            args.batch_size = 64
-        elif args.language == "java":
-            args.batch_size = 32
-        elif args.language == "cpp":
-            args.batch_size = 16
+        args.batch_size = 64 if args.language == "python" else (32 if args.language == "java" else 16)
             
     evaluate_model(language=args.language, batch_size=args.batch_size)

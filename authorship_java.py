@@ -1,3 +1,5 @@
+import sys
+sys.setrecursionlimit(10000)
 import re
 import numpy as np
 import tree_sitter_java as tsjava
@@ -62,15 +64,15 @@ def extract_java_authorship(code):
         elif ntype in ['marker_annotation', 'annotation']: annotations += 1
         elif ntype == 'return_statement': returns += 1
         elif ntype in ['break_statement', 'continue_statement']: breaks += 1
-        elif ntype == 'formal_parameters': params += len(node.children)
+        elif ntype == 'formal_parameters': params += sum(1 for c in node.children if c.is_named)
         elif ntype == 'import_declaration': imports += 1
         elif ntype in ['assert_statement', 'throw_statement']: asserts += 1
         elif ntype == 'string_literal': string_lits += (node.end_byte - node.start_byte)
         elif ntype == 'identifier':
-            if node.parent and node.parent.type in ['variable_declarator', 'formal_parameter']:
-                var_names.append(code[node.start_byte:node.end_byte])
+            if node.parent and node.parent.type in ['variable_declarator', 'formal_parameter', 'field_declaration', 'enhanced_for_statement']:
+                var_names.append(bytes(code, 'utf8')[node.start_byte:node.end_byte].decode('utf8', errors='ignore'))
             elif node.parent and node.parent.type in ['method_declaration']:
-                func_names.append(code[node.start_byte:node.end_byte])
+                func_names.append(bytes(code, 'utf8')[node.start_byte:node.end_byte].decode('utf8', errors='ignore'))
         
         if ntype == 'block': max_nest = max(max_nest, depth // 2)
         for child in node.children: traverse(child, depth + 1)
