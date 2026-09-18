@@ -10,7 +10,6 @@ class SemanticExtractor:
 
     def extract_batch(self, codes):
         inputs = self.tokenizer(codes, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self.model(**inputs)
-        # Reverted to literal [CLS] (first token) extraction to match Paper Sec. 3.1.3
         return outputs.last_hidden_state[:, 0, :].cpu().numpy()

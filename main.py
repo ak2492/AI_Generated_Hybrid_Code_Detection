@@ -11,7 +11,8 @@ from authorship_python import extract_python_authorship as extract_python
 from authorship_java import extract_java_authorship as extract_java
 from authorship_cpp import extract_cpp_authorship as extract_cpp
 
-def run_extraction(language="python", split="train", limit=None, sem_batch=32, stat_batch=32):
+# Increased batch limits from 32 to 128
+def run_extraction(language="python", split="train", limit=None, sem_batch=128, stat_batch=128):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nInitializing {language.upper()} decoupled pipeline for {split} split on {device}...")
     
@@ -28,38 +29,31 @@ def run_extraction(language="python", split="train", limit=None, sem_batch=32, s
         
     all_sem, all_stat = [], []
     
-    # Phase 1: Semantic Extraction (CodeT5+)
     print("Phase 1: Running Semantic Extraction...")
     sem_extractor = SemanticExtractor(device)
     for i in tqdm(range(0, len(codes), sem_batch), desc="CodeT5+ Batches", unit="batch"):
         batch = codes[i : i + sem_batch]
         all_sem.append(sem_extractor.extract_batch(batch))
     
-    # Flush VRAM
     del sem_extractor
     torch.cuda.empty_cache()
     gc.collect()
     
-    # Phase 2: Statistical Extraction (CodeBERT)
     print("Phase 2: Running Statistical Extraction...")
     stat_extractor = StatisticalExtractor(device)
     for i in tqdm(range(0, len(codes), stat_batch), desc="CodeBERT Batches", unit="batch"):
         batch = codes[i : i + stat_batch]
         all_stat.append(stat_extractor.extract_batch(batch))
         
-    # Flush VRAM
     del stat_extractor
     torch.cuda.empty_cache()
     gc.collect()
 
-    # Phase 3: Authorship Extraction (Tree-sitter via Multiprocessing)
     print(f"Phase 3: Running AST Parsing across {cpu_count()} CPU cores...")
     with Pool(processes=cpu_count()) as pool:
-        # Using imap instead of map allows tqdm to track asynchronous progress
         all_auth_flat = list(tqdm(pool.imap(auth_parser, codes), total=len(codes), desc="AST Parsing", unit="snippet"))
     all_auth = [np.array(all_auth_flat)]
     
-    # Final Matrix Assembly
     X = np.hstack((np.vstack(all_sem), np.vstack(all_stat), np.vstack(all_auth)))
     y = np.array(labels)
     
