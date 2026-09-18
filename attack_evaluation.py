@@ -199,19 +199,20 @@ def get_attacked_corpus(codes, labels, attack_type, language, base_seed=42):
         c_mod = c
         # Per-sample deterministic RNG: reproducible across runs/machines.
         rng = random.Random(base_seed + idx)
-        # NOTE: applied to every sample (see docstring) to reproduce Table 9.
-        if attack_type in ["auth", "full"]:
-            c_mod, k = strip_comments_safely(c_mod, parser)
-            n_comment += k
-            if k:
-                n_comment_samples += 1
-        if attack_type in ["sem", "full"]:
-            c_mod, k = meaning_preserving_rename(c_mod, parser, language, config)
-            n_rename += k
-            if k:
-                n_rename_samples += 1
-        if attack_type in ["stat", "full"]:
-            c_mod = apply_statistical_attack(c_mod, rng)
+        # Apply obfuscator ONLY to machine-generated samples to be faithful to the base paper text.
+        if l == 1:
+            if attack_type in ["auth", "full"]:
+                c_mod, k = strip_comments_safely(c_mod, parser)
+                n_comment += k
+                if k:
+                    n_comment_samples += 1
+            if attack_type in ["sem", "full"]:
+                c_mod, k = meaning_preserving_rename(c_mod, parser, language, config)
+                n_rename += k
+                if k:
+                    n_rename_samples += 1
+            if attack_type in ["stat", "full"]:
+                c_mod = apply_statistical_attack(c_mod, rng)
 
         sem_codes.append(c_mod)
         stat_codes.append(c_mod)
@@ -261,8 +262,8 @@ def evaluate_attack(language, attack_type, limit, batch_size, base_seed=42):
     elif language == "cpp":
         auth_parser = extract_cpp_authorship
 
-    with Pool(processes=cpu_count()) as pool:
-        all_auth_flat = list(tqdm(pool.imap(auth_parser, auth_codes), total=len(auth_codes), desc=f"Parsing AST Features ({cpu_count()} CPU Threads)", leave=True))
+    print("Parsing AST Features serially to avoid Kaggle multiprocessing freezes...")
+    all_auth_flat = [auth_parser(c) for c in tqdm(auth_codes, desc="Parsing AST Features", leave=True)]
 
     X_test = np.hstack((np.vstack(all_sem), np.vstack(all_stat), np.array(all_auth_flat)))
     scaler = joblib.load(f"{language}_scaler.pkl")

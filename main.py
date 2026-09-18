@@ -49,9 +49,8 @@ def run_extraction(language="python", split="train", limit=None, sem_batch=64, s
     torch.cuda.empty_cache()
     gc.collect()
 
-    print(f"Phase 3: Running AST Parsing across {cpu_count()} CPU cores...")
-    with Pool(processes=cpu_count()) as pool:
-        all_auth_flat = list(tqdm(pool.imap(auth_parser, codes), total=len(codes), desc="AST Parsing", unit="snippet"))
+    print("Phase 3: Running AST Parsing serially to avoid Kaggle multiprocessing freezes...")
+    all_auth_flat = [auth_parser(c) for c in tqdm(codes, desc="AST Parsing", unit="snippet")]
     all_auth = [np.array(all_auth_flat)]
     
     X = np.hstack((np.vstack(all_sem), np.vstack(all_stat), np.vstack(all_auth)))
