@@ -11,8 +11,8 @@ from authorship_python import extract_python_authorship as extract_python
 from authorship_java import extract_java_authorship as extract_java
 from authorship_cpp import extract_cpp_authorship as extract_cpp
 
-# Increased batch limits from 32 to 128
-def run_extraction(language="python", split="train", limit=None, sem_batch=128, stat_batch=128):
+# FIX: Throttled stat_batch down to 32 to prevent 15GB VRAM OOM crashes on Kaggle T4
+def run_extraction(language="python", split="train", limit=None, sem_batch=64, stat_batch=32):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nInitializing {language.upper()} decoupled pipeline for {split} split on {device}...")
     
