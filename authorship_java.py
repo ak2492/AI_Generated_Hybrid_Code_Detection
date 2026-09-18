@@ -79,7 +79,7 @@ def extract_java_authorship(code):
         elif ntype == 'identifier':
             if node.parent and node.parent.type in ['variable_declarator', 'formal_parameter', 'catch_formal_parameter', 'spread_parameter', 'field_declaration', 'enhanced_for_statement', 'resource']:
                 var_names.append(code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
-            elif node.parent and node.parent.type in ['method_declaration']:
+            elif node.parent and node.parent.type in ['method_declaration', 'constructor_declaration']:
                 func_names.append(code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
         
         if ntype == 'block': max_nest = max(max_nest, depth // 2)
