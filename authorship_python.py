@@ -49,13 +49,13 @@ def extract_python_authorship(code):
     features[19] = np.mean([n.end_byte - n.start_byte for n in all_c]) if all_c else 0
     
     node_count, max_depth, loops, conditionals, functions, classes = 0, 0, 0, 0, 0, 0
-    cyclomatic, max_nest, list_comps, decorators, oo_patterns = 0, 0, 0, 0, 0
+    cyclomatic, max_nest, list_comps, decorators, lambdas = 0, 0, 0, 0, 0
     switch_match, try_catch, returns, breaks, params, imports, asserts = 0, 0, 0, 0, 0, 0, 0
     var_names, func_names, string_lits = [], [], 0
 
     def traverse(node, depth):
         nonlocal node_count, max_depth, loops, conditionals, functions, classes
-        nonlocal cyclomatic, max_nest, list_comps, decorators, oo_patterns
+        nonlocal cyclomatic, max_nest, list_comps, decorators, lambdas
         nonlocal switch_match, try_catch, returns, breaks, params, imports, string_lits, asserts
         
         node_count += 1
@@ -66,7 +66,8 @@ def extract_python_authorship(code):
         elif ntype in ['if_statement']: conditionals += 1; cyclomatic += 1
         elif ntype == 'match_statement': switch_match += 1; cyclomatic += 1
         elif ntype == 'function_definition': functions += 1
-        elif ntype == 'class_definition': classes += 1; oo_patterns += 1
+        elif ntype == 'class_definition': classes += 1
+        elif ntype == 'lambda': lambdas += 1
         elif ntype == 'try_statement': try_catch += 1
         elif ntype in ['list_comprehension', 'dictionary_comprehension', 'set_comprehension']: list_comps += 1
         elif ntype == 'decorator': decorators += 1
@@ -108,6 +109,6 @@ def extract_python_authorship(code):
     features[9] = string_lits / max(chars, 1)
     
     # 4. Syntactic Features (Dimensions 20-37 - Fully populated 18 slots)
-    features[20:38] = [node_count, max_depth, loops, conditionals, functions, classes, cyclomatic, max_nest, list_comps, decorators, oo_patterns, switch_match, try_catch, returns, breaks, params, imports, asserts]
+    features[20:38] = [node_count, max_depth, loops, conditionals, functions, classes, cyclomatic, max_nest, list_comps, decorators, lambdas, switch_match, try_catch, returns, breaks, params, imports, asserts]
     
     return features
