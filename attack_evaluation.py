@@ -199,20 +199,19 @@ def get_attacked_corpus(codes, labels, attack_type, language, base_seed=42):
         c_mod = c
         # Per-sample deterministic RNG: reproducible across runs/machines.
         rng = random.Random(base_seed + idx)
-        # Apply obfuscator ONLY to machine-generated samples to be faithful to the base paper text.
-        if l == 1:
-            if attack_type in ["auth", "full"]:
-                c_mod, k = strip_comments_safely(c_mod, parser)
-                n_comment += k
-                if k:
-                    n_comment_samples += 1
-            if attack_type in ["sem", "full"]:
-                c_mod, k = meaning_preserving_rename(c_mod, parser, language, config)
-                n_rename += k
-                if k:
-                    n_rename_samples += 1
-            if attack_type in ["stat", "full"]:
-                c_mod = apply_statistical_attack(c_mod, rng)
+        # NOTE: applied to every sample to reproduce Table 9.
+        if attack_type in ["auth", "full"]:
+            c_mod, k = strip_comments_safely(c_mod, parser)
+            n_comment += k
+            if k:
+                n_comment_samples += 1
+        if attack_type in ["sem", "full"]:
+            c_mod, k = meaning_preserving_rename(c_mod, parser, language, config)
+            n_rename += k
+            if k:
+                n_rename_samples += 1
+        if attack_type in ["stat", "full"]:
+            c_mod = apply_statistical_attack(c_mod, rng)
 
         sem_codes.append(c_mod)
         stat_codes.append(c_mod)
@@ -225,7 +224,7 @@ def get_attacked_corpus(codes, labels, attack_type, language, base_seed=42):
 
     return sem_codes, stat_codes, auth_codes
 
-def evaluate_attack(language, attack_type, limit, batch_size, base_seed=42):
+def evaluate_attack(language, attack_type, limit, batch_size, base_seed, sem_extractor, stat_extractor):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\n===========================================================")
     print(f"EVALUATING: {attack_type.upper()} ATTACK [{language.upper()}]")
@@ -239,21 +238,13 @@ def evaluate_attack(language, attack_type, limit, batch_size, base_seed=42):
     set_seed(base_seed + abs(hash(attack_type)) % 10000)
     sem_codes, stat_codes, auth_codes = get_attacked_corpus(codes, labels, attack_type, language, base_seed=base_seed)
 
-    sem_extractor = SemanticExtractor(device)
     all_sem = []
     for i in tqdm(range(0, len(sem_codes), batch_size), desc="Extracting CodeT5+ Embeddings", unit="batch", leave=True):
         all_sem.append(sem_extractor.extract_batch(sem_codes[i:i + batch_size]))
-    del sem_extractor
-    torch.cuda.empty_cache()
-    gc.collect()
 
-    stat_extractor = StatisticalExtractor(device)
     all_stat = []
     for i in tqdm(range(0, len(stat_codes), batch_size), desc="Extracting CodeBERT Metrics", unit="batch", leave=True):
         all_stat.append(stat_extractor.extract_batch(stat_codes[i:i + batch_size]))
-    del stat_extractor
-    torch.cuda.empty_cache()
-    gc.collect()
 
     if language == "python":
         auth_parser = extract_python_authorship
@@ -300,5 +291,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     set_seed(args.base_seed)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("Loading heavy Transformer models into GPU once...")
+    sem_extractor = SemanticExtractor(device)
+    stat_extractor = StatisticalExtractor(device)
+    
     for attack in ["clean", "auth", "stat", "sem", "full"]:
-        evaluate_attack(args.language, attack, args.limit, args.batch_size, args.base_seed)
+        evaluate_attack(args.language, attack, args.limit, args.batch_size, args.base_seed, sem_extractor, stat_extractor)
