@@ -1,7 +1,6 @@
 import os
 import warnings
 
-# Suppress Hugging Face Safetensors threading and structural warnings
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 warnings.filterwarnings("ignore")
@@ -38,27 +37,20 @@ def set_seed(seed=42):
     torch.manual_seed(seed)
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
 
-# =====================================================================================
-# CROSS-LANGUAGE AST OBFUSCATION CONFIGURATIONS
-# =====================================================================================
-
 def get_language_config(language):
     if language == "python":
         return {
             "lang_obj": Language(tspython.language()),
-            "query": "(assignment left: (identifier) @v) (assignment left: (pattern_list (identifier) @v)) (parameters (identifier) @v) (for_statement left: (identifier) @v) (for_in_clause left: (identifier) @v)",
             "reserved": {"False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"}
         }
     elif language == "java":
         return {
             "lang_obj": Language(tsjava.language()),
-            "query": "(variable_declarator name: (identifier) @v) (formal_parameter name: (identifier) @v) (catch_formal_parameter name: (identifier) @v) (enhanced_for_statement type: _ name: (identifier) @v)",
             "reserved": {"abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const", "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float", "for", "goto", "if", "implements", "import", "instanceof", "int", "interface", "long", "native", "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp", "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try", "void", "volatile", "while", "true", "false", "null"}
         }
     elif language == "cpp":
         return {
             "lang_obj": Language(tscpp.language()),
-            "query": "(init_declarator declarator: (identifier) @v) (parameter_declaration declarator: (identifier) @v) (declaration declarator: (identifier) @v) (for_range_loop declarator: (identifier) @v)",
             "reserved": {"alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor", "bool", "break", "case", "catch", "char", "char8_t", "char16_t", "char32_t", "class", "compl", "concept", "const", "consteval", "constexpr", "constinit", "const_cast", "continue", "co_await", "co_return", "co_yield", "decltype", "default", "delete", "do", "double", "dynamic_cast", "else", "enum", "explicit", "export", "extern", "false", "float", "for", "friend", "goto", "if", "inline", "int", "long", "mutable", "namespace", "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq", "private", "protected", "public", "register", "reinterpret_cast", "requires", "return", "short", "signed", "sizeof", "static", "static_assert", "static_cast", "struct", "switch", "template", "this", "thread_local", "throw", "true", "try", "typedef", "typeid", "typename", "union", "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "while", "xor", "xor_eq"}
         }
     raise ValueError("Unsupported language")
@@ -78,39 +70,48 @@ def strip_comments_safely(code_str, parser):
         return code_bytes.decode("utf8", errors="ignore")
     except: return code_str
 
-def meaning_preserving_rename(code_str, parser, config):
+def meaning_preserving_rename(code_str, parser, language, config):
     try:
         code_bytes_raw = bytes(code_str, "utf8")
         tree = parser.parse(code_bytes_raw)
-        query = config["lang_obj"].query(config["query"])
-        captures = query.captures(tree.root_node)
         
-        captured_nodes = []
-        if isinstance(captures, dict):
-            for nodes in captures.values(): captured_nodes.extend(nodes)
-        else:
-            captured_nodes = [node for node, _ in captures]
-            
-        target_names = {code_bytes_raw[node.start_byte:node.end_byte].decode("utf8") for node in captured_nodes}
+        target_nodes = []
+        def find_targets(node):
+            if node.type == 'identifier':
+                parent_type = node.parent.type if node.parent else ""
+                if language == "python" and parent_type in ['assignment', 'parameters', 'for_statement', 'with_statement', 'except_clause', 'ann_assign']:
+                    target_nodes.append(node)
+                elif language == "java" and parent_type in ['variable_declarator', 'formal_parameter', 'field_declaration', 'enhanced_for_statement']:
+                    target_nodes.append(node)
+                elif language == "cpp" and parent_type in ['init_declarator', 'parameter_declaration', 'declaration', 'for_range_loop']:
+                    target_nodes.append(node)
+            for child in node.children:
+                find_targets(child)
+                
+        find_targets(tree.root_node)
+        
+        target_names = {code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore") for node in target_nodes}
         target_names = target_names - config["reserved"]
         if not target_names: return code_str
             
         var_map = {name: f"v_{i+1}" for i, name in enumerate(target_names)}
         
         identifier_nodes = []
-        def find_identifiers(node):
+        def find_all_identifiers(node):
             if node.type == 'identifier': identifier_nodes.append(node)
-            for child in node.children: find_identifiers(child)
-        find_identifiers(tree.root_node)
+            for child in node.children: find_all_identifiers(child)
+        find_all_identifiers(tree.root_node)
         identifier_nodes.sort(key=lambda n: n.start_byte, reverse=True)
         
         code_bytes = bytearray(code_bytes_raw)
         for node in identifier_nodes:
-            name = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8")
+            name = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
             if name in var_map:
                 code_bytes[node.start_byte:node.end_byte] = bytes(var_map[name], "utf8")
         return code_bytes.decode("utf8", errors="ignore")
-    except: return code_str
+    except Exception as e:
+        print(f"Warning: Semantic rename failed - {e}")
+        return code_str
 
 def apply_statistical_attack(code_str):
     lines = code_str.split('\n')
@@ -130,24 +131,18 @@ def get_attacked_corpus(codes, labels, attack_type, language):
     sem_codes, stat_codes, auth_codes = [], [], []
     
     for c, l in tqdm(zip(codes, labels), total=len(codes), desc=f"Synthesizing {attack_type.upper()} Samples", unit="snippet", leave=True):
-        c_sem, c_stat, c_auth = c, c, c
+        c_mod = c
         if l == 1:
-            if attack_type in ["sem", "full"]:
-                c_sem = meaning_preserving_rename(c, parser, config)
-            if attack_type in ["stat", "full"]:
-                c_stat = apply_statistical_attack(c)
             if attack_type in ["auth", "full"]:
-                c_auth = strip_comments_safely(c, parser)
+                c_mod = strip_comments_safely(c_mod, parser)
+            if attack_type in ["sem", "full"]:
+                c_mod = meaning_preserving_rename(c_mod, parser, language, config)
+            if attack_type in ["stat", "full"]:
+                c_mod = apply_statistical_attack(c_mod)
                 
-            if attack_type == "full":
-                c_full = strip_comments_safely(c, parser)
-                c_full = meaning_preserving_rename(c_full, parser, config)
-                c_full = apply_statistical_attack(c_full)
-                c_sem, c_stat, c_auth = c_full, c_full, c_full
-                
-        sem_codes.append(c_sem)
-        stat_codes.append(c_stat)
-        auth_codes.append(c_auth)
+        sem_codes.append(c_mod)
+        stat_codes.append(c_mod)
+        auth_codes.append(c_mod)
         
     return sem_codes, stat_codes, auth_codes
 
