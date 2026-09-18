@@ -77,7 +77,7 @@ def extract_java_authorship(code):
         elif ntype in ['assert_statement', 'throw_statement']: asserts += 1
         elif ntype == 'string_literal': string_lits += (node.end_byte - node.start_byte)
         elif ntype == 'identifier':
-            if node.parent and node.parent.type in ['variable_declarator', 'formal_parameter', 'field_declaration', 'enhanced_for_statement']:
+            if node.parent and node.parent.type in ['variable_declarator', 'formal_parameter', 'catch_formal_parameter', 'spread_parameter', 'field_declaration', 'enhanced_for_statement', 'resource']:
                 var_names.append(code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
             elif node.parent and node.parent.type in ['method_declaration']:
                 func_names.append(code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))

@@ -78,7 +78,7 @@ def extract_python_authorship(code):
         elif ntype in ['assert_statement', 'raise_statement']: asserts += 1
         elif ntype == 'string': string_lits += (node.end_byte - node.start_byte)
         elif ntype == 'identifier':
-            if node.parent and node.parent.type in ['assignment', 'parameters', 'for_statement', 'with_statement', 'except_clause', 'ann_assign']:
+            if node.parent and node.parent.type in ['assignment', 'ann_assign', 'parameters', 'for_statement', 'for_in_clause', 'with_statement', 'except_clause', 'pattern_list', 'named_expression', 'as_pattern']:
                 var_names.append(code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
             elif node.parent and node.parent.type == 'function_definition':
                 func_names.append(code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))

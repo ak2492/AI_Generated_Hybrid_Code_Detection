@@ -77,7 +77,7 @@ def extract_cpp_authorship(code):
         elif ntype == 'throw_statement': asserts += 1
         elif ntype == 'string_literal': string_lits += (node.end_byte - node.start_byte)
         elif ntype == 'identifier':
-            if node.parent and node.parent.type in ['init_declarator', 'parameter_declaration', 'declaration', 'for_range_loop']:
+            if node.parent and node.parent.type in ['init_declarator', 'parameter_declaration', 'declaration', 'for_range_loop', 'condition_clause', 'declarator']:
                 var_names.append(code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
             elif node.parent and node.parent.type == 'function_declarator':
                 func_names.append(code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
