@@ -10,15 +10,19 @@ from statistical_extractor import StatisticalExtractor
 from authorship_python import extract_python_authorship as extract_python
 from authorship_java import extract_java_authorship as extract_java
 from authorship_cpp import extract_cpp_authorship as extract_cpp
+from augment import generate_adversarial_augmentations
 
 # FIX: Throttled stat_batch down to 32 to prevent 15GB VRAM OOM crashes on Kaggle T4
-def run_extraction(language="python", split="train", limit=None, sem_batch=64, stat_batch=32):
+def run_extraction(language="python", split="train", limit=None, sem_batch=64, stat_batch=32, adversarial=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nInitializing {language.upper()} decoupled pipeline for {split} split on {device}...")
     
     codes, labels = load_code_data(language=language, split=split, limit=limit)
     if len(codes) == 0:
         return
+        
+    if split == "train" and adversarial:
+        codes, labels = generate_adversarial_augmentations(codes, labels, language=language)
 
     if language == "python":
         auth_parser = extract_python
@@ -56,15 +60,20 @@ def run_extraction(language="python", split="train", limit=None, sem_batch=64, s
     X = np.hstack((np.vstack(all_sem), np.vstack(all_stat), np.vstack(all_auth)))
     y = np.array(labels)
     
-    np.save(f"{language}_{split}_X.npy", X)
-    np.save(f"{language}_{split}_y.npy", y)
+    if split == "train" and adversarial:
+        np.save(f"{language}_{split}_adv_X.npy", X)
+        np.save(f"{language}_{split}_adv_y.npy", y)
+    else:
+        np.save(f"{language}_{split}_X.npy", X)
+        np.save(f"{language}_{split}_y.npy", y)
     print(f"Extraction complete for {split}. Array shape: {X.shape}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--language", type=str, default="python")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--adversarial", action="store_true", help="Synthesize adversarial dataset during training split extraction")
     args = parser.parse_args()
     
     for dataset_split in ["train", "validation", "test"]:
-        run_extraction(language=args.language, split=dataset_split, limit=args.limit)
+        run_extraction(language=args.language, split=dataset_split, limit=args.limit, adversarial=args.adversarial)
