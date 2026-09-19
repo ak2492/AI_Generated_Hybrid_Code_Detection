@@ -14,9 +14,9 @@ import argparse
 from tree_sitter import Parser
 from attack_utils import (
     set_seed, get_language_config, get_ts_parser, meaning_preserving_rename,
+    meaning_preserving_rename_strong,
     run_attack_evaluation,
 )
-
 
 def main():
     ap = argparse.ArgumentParser(description="Semantic Attack Evaluation")
@@ -25,18 +25,29 @@ def main():
     ap.add_argument("--limit",      type=int, default=None)
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--base_seed",  type=int, default=42)
+    ap.add_argument("--mode", type=str, default="strong",
+                    choices=["paper", "strong"],
+                    help="'paper'=rename variables only; 'strong'=rename variables, functions, and classes (default)")
     args = ap.parse_args()
 
     set_seed(args.base_seed)
     config    = get_language_config(args.language)
     ts_parser = get_ts_parser(config["lang_obj"])
 
-    def apply_attack(code, idx):
-        mod, _ = meaning_preserving_rename(
-            code, ts_parser, args.language, config)
-        return mod
+    if args.mode == "paper":
+        def apply_attack(code, idx):
+            mod, _ = meaning_preserving_rename(
+                code, ts_parser, args.language, config)
+            return mod
+        name = "semantic-paper"
+    else:
+        def apply_attack(code, idx):
+            mod, _ = meaning_preserving_rename_strong(
+                code, ts_parser, args.language, config)
+            return mod
+        name = "semantic-strong"
 
-    run_attack_evaluation(args.language, "semantic", apply_attack,
+    run_attack_evaluation(args.language, name, apply_attack,
                           args.batch_size, args.limit, args.base_seed)
 
 

@@ -14,7 +14,7 @@ import argparse
 from tree_sitter import Parser
 from attack_utils import (
     set_seed, get_language_config, get_ts_parser,
-    strip_comments, strip_comments_enhanced,
+    strip_comments, strip_comments_enhanced, strip_comments_strong,
     run_attack_evaluation,
 )
 
@@ -27,10 +27,11 @@ def main():
                     help="Cap on number of test samples (for quick debugging)")
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--base_seed",  type=int, default=42)
-    ap.add_argument("--mode", type=str, default="enhanced",
-                    choices=["paper", "enhanced"],
+    ap.add_argument("--mode", type=str, default="strong",
+                    choices=["paper", "enhanced", "strong"],
                     help="'paper'=comment removal only; "
-                         "'enhanced'=comments+docstrings+layout (default)")
+                         "'enhanced'=comments+docstrings+layout; "
+                         "'strong'=enhanced+case_swapping+spacing (default)")
     args = ap.parse_args()
 
     set_seed(args.base_seed)
@@ -42,11 +43,16 @@ def main():
             mod, _ = strip_comments(code, ts_parser)
             return mod
         name = "authorship-paper"
-    else:
+    elif args.mode == "enhanced":
         def apply_attack(code, idx):
             mod, _ = strip_comments_enhanced(code, ts_parser, args.language)
             return mod
         name = "authorship-enhanced"
+    else:
+        def apply_attack(code, idx):
+            mod, _ = strip_comments_strong(code, ts_parser, args.language, config)
+            return mod
+        name = "authorship-strong"
 
     run_attack_evaluation(args.language, name, apply_attack,
                           args.batch_size, args.limit, args.base_seed)

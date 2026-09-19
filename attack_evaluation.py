@@ -197,21 +197,23 @@ def get_attacked_corpus(codes, labels, attack_type, language, base_seed=42):
 
     for idx, (c, l) in enumerate(tqdm(zip(codes, labels), total=len(codes), desc=f"Synthesizing {attack_type.upper()} Samples", unit="snippet", leave=True)):
         c_mod = c
-        # Per-sample deterministic RNG: reproducible across runs/machines.
-        rng = random.Random(base_seed + idx)
-        # NOTE: applied to every sample to reproduce Table 9.
-        if attack_type in ["auth", "full"]:
-            c_mod, k = strip_comments_safely(c_mod, parser)
-            n_comment += k
-            if k:
-                n_comment_samples += 1
-        if attack_type in ["sem", "full"]:
-            c_mod, k = meaning_preserving_rename(c_mod, parser, language, config)
-            n_rename += k
-            if k:
-                n_rename_samples += 1
-        if attack_type in ["stat", "full"]:
-            c_mod = apply_statistical_attack(c_mod, rng)
+        if l == 1:
+            # Per-sample deterministic RNG: reproducible across runs/machines.
+            rng = random.Random(base_seed + idx)
+            # Use strong versions of the attacks
+            from attack_utils import strip_comments_strong, meaning_preserving_rename_strong
+            if attack_type in ["auth", "full"]:
+                c_mod, k = strip_comments_strong(c_mod, parser, language, config)
+                n_comment += k
+                if k:
+                    n_comment_samples += 1
+            if attack_type in ["sem", "full"]:
+                c_mod, k = meaning_preserving_rename_strong(c_mod, parser, language, config)
+                n_rename += k
+                if k:
+                    n_rename_samples += 1
+            if attack_type in ["stat", "full"]:
+                c_mod = apply_statistical_attack(c_mod, rng)
 
         sem_codes.append(c_mod)
         stat_codes.append(c_mod)

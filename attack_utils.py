@@ -22,6 +22,7 @@ import random
 import numpy as np
 import torch
 import joblib
+import re
 
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -272,6 +273,77 @@ def strip_comments_enhanced(code_str, parser, language):
         return code_str, 0
 
 
+def strip_comments_strong(code_str, parser, language, config):
+    """Strong authorship attack: removes comments/docstrings, manipulates case/spacing/layout."""
+    import random
+    rng = random.Random(42) # fixed seed for reproducibility or could use hash of code
+
+    # 1. Base enhanced strip
+    code_str, n_removed = strip_comments_enhanced(code_str, parser, language)
+    if not code_str:
+        return code_str, 0
+
+    # 2. Case Swapping (identifier nodes)
+    try:
+        code_bytes_raw = bytes(code_str, "utf8")
+        tree = parser.parse(code_bytes_raw)
+        
+        all_ids = [n for n in _iter_nodes(tree.root_node) if n.type == "identifier"]
+        all_ids.sort(key=lambda n: n.start_byte, reverse=True)
+
+        code_bytes = bytearray(code_bytes_raw)
+        n_case_swaps = 0
+        
+        for node in all_ids:
+            name = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
+            if not name or name in config["reserved"]:
+                continue
+                
+            new_name = name
+            if '_' in name and rng.random() < 0.5:
+                # snake_case to camelCase
+                parts = name.split('_')
+                if len(parts) > 1 and parts[0]:
+                    new_name = parts[0] + ''.join(p.capitalize() for p in parts[1:])
+            elif re.search(r'[A-Z]', name) and rng.random() < 0.5:
+                # camelCase to snake_case
+                s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+                new_name = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+                
+            if new_name != name:
+                code_bytes[node.start_byte:node.end_byte] = bytes(new_name, "utf8")
+                n_case_swaps += 1
+                
+        code_str = code_bytes.decode("utf8", errors="ignore")
+    except Exception as e:
+        pass
+
+    # 3. Layout / Spacing manipulation
+    lines = code_str.split("\n")
+    new_lines = []
+    for line in lines:
+        # Operator spacing
+        if rng.random() < 0.3:
+            # remove spaces around operators
+            line = re.sub(r'\s*([=+\-*/<>!&|%^]+)\s*', r'\1', line)
+        elif rng.random() < 0.3:
+            # add spaces around operators
+            line = re.sub(r'([=+\-*/<>!&|%^]+)', r' \1 ', line)
+            
+        # Tab/Space mix
+        if rng.random() < 0.2:
+            line = line.replace('    ', '\t')
+        elif rng.random() < 0.2:
+            line = line.replace('\t', '    ')
+            
+        new_lines.append(line)
+        
+        # Inject empty line
+        if rng.random() < 0.05:
+            new_lines.append("")
+
+    return "\n".join(new_lines), n_removed + n_case_swaps
+
 def meaning_preserving_rename(code_str, parser, language, config):
     """Paper Sec 4.7 — Semantic Layer: rename variables to v_1 … v_n.
 
@@ -301,6 +373,54 @@ def meaning_preserving_rename(code_str, parser, language, config):
         var_map = {n: f"v_{i+1}" for i, n in enumerate(sorted(target_names))}
 
         # 2. replace every matching identifier occurrence (reverse order)
+        all_ids = [n for n in _iter_nodes(tree.root_node)
+                   if n.type == "identifier"]
+        all_ids.sort(key=lambda n: n.start_byte, reverse=True)
+
+        code_bytes = bytearray(code_bytes_raw)
+        for node in all_ids:
+            name = code_bytes_raw[node.start_byte:node.end_byte] \
+                       .decode("utf8", errors="ignore")
+            if name in var_map:
+                code_bytes[node.start_byte:node.end_byte] = \
+                    bytes(var_map[name], "utf8")
+
+        return code_bytes.decode("utf8", errors="ignore"), len(target_names)
+    except Exception:
+        return code_str, 0
+
+
+def meaning_preserving_rename_strong(code_str, parser, language, config):
+    """Strong Semantic Layer: rename variables, functions, and classes."""
+    try:
+        if not code_str or len(code_str) > MAX_CODE_SIZE:
+            return code_str, 0
+        code_bytes_raw = bytes(code_str, "utf8")
+        tree = parser.parse(code_bytes_raw)
+        
+        # Extend allowed types to include function and class definitions
+        allowed = set(VAR_PARENTS[language])
+        if language == "python":
+            allowed.update({"function_definition", "class_definition"})
+        elif language == "java":
+            allowed.update({"method_declaration", "class_declaration"})
+        elif language == "cpp":
+            allowed.update({"function_definition", "class_specifier", "struct_specifier"})
+
+        target_names = set()
+        for node in _iter_nodes(tree.root_node):
+            if node.type == "identifier":
+                pt = node.parent.type if node.parent else ""
+                if pt in allowed:
+                    name = code_bytes_raw[node.start_byte:node.end_byte] \
+                               .decode("utf8", errors="ignore")
+                    if name and name not in config["reserved"]:
+                        target_names.add(name)
+        if not target_names:
+            return code_str, 0
+
+        var_map = {n: f"v_{i+1}" for i, n in enumerate(sorted(target_names))}
+
         all_ids = [n for n in _iter_nodes(tree.root_node)
                    if n.type == "identifier"]
         all_ids.sort(key=lambda n: n.start_byte, reverse=True)
@@ -404,16 +524,20 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     # ---- 2. Apply attack --------------------------------------------------
     attacked = []
     n_mod = 0
-    for idx, code in enumerate(tqdm(codes, desc="Attacking",
-                                    unit="snippet", leave=True)):
-        try:
-            mod = apply_attack_fn(code, idx)
-        except Exception:
+    for idx, (code, label) in enumerate(tqdm(zip(codes, labels), desc="Attacking",
+                                    total=len(codes), unit="snippet", leave=True)):
+        if label == 1:
+            try:
+                mod = apply_attack_fn(code, idx)
+            except Exception:
+                mod = code
+        else:
             mod = code
+            
         if mod != code:
             n_mod += 1
         attacked.append(mod)
-    print(f"  Modified {n_mod}/{len(codes)} samples")
+    print(f"  Modified {n_mod}/{n_machine} machine samples (total test size: {len(codes)})")
 
     # ---- 3a. Semantic embeddings (CodeT5+) --------------------------------
     print("\nPhase 1/3: CodeT5+ semantic embeddings …")
