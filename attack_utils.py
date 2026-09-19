@@ -504,7 +504,7 @@ def safe_extract_authorship(code, auth_parser_fn):
 
 def run_attack_evaluation(language, attack_name, apply_attack_fn,
                           batch_size=32, limit=None, base_seed=42,
-                          attack_all_samples=False):
+                          attack_all_samples=False, adversarial=False):
     """End-to-end pipeline
 
     Parameters
@@ -594,13 +594,15 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
                    np.array(all_auth)))
     print(f"  Feature matrix: {X.shape}")
 
-    scaler = joblib.load(f"{language}_scaler.pkl")
+    scaler_file = f"{language}_adv_scaler.pkl" if adversarial else f"{language}_scaler.pkl"
+    scaler = joblib.load(scaler_file)
     X_scaled = scaler.transform(X)
 
     # ---- 5. Inference -----------------------------------------------------
     model = HybridCodeDetector().to(device)
+    model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
     model.load_state_dict(
-        torch.load(f"{language}_best_model.pt", map_location=device))
+        torch.load(model_file, map_location=device))
     model.eval()
 
     with torch.no_grad():

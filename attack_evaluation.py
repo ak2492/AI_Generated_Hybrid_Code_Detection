@@ -80,7 +80,7 @@ def get_attacked_corpus(codes, labels, attack_type, language, mode="enhanced", b
 
     return attacked_codes
 
-def evaluate_attack(language, attack_type, mode, limit, batch_size, base_seed, sem_extractor, stat_extractor):
+def evaluate_attack(language, attack_type, mode, limit, batch_size, base_seed, sem_extractor, stat_extractor, adversarial=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\n===========================================================")
     print(f"EVALUATING: {attack_type.upper()} ATTACK [{language.upper()}] MODE: {mode.upper()}")
@@ -111,11 +111,13 @@ def evaluate_attack(language, attack_type, mode, limit, batch_size, base_seed, s
     all_auth_flat = [safe_extract_authorship(c, auth_parser) for c in tqdm(attacked_codes, desc="Parsing AST Features", leave=True)]
 
     X_test = np.hstack((np.vstack(all_sem), np.vstack(all_stat), np.array(all_auth_flat)))
-    scaler = joblib.load(f"{language}_scaler.pkl")
+    scaler_file = f"{language}_adv_scaler.pkl" if adversarial else f"{language}_scaler.pkl"
+    scaler = joblib.load(scaler_file)
     X_scaled = scaler.transform(X_test)
 
     model = HybridCodeDetector().to(device)
-    model.load_state_dict(torch.load(f"{language}_best_model.pt", map_location=device))
+    model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
+    model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 
     with torch.no_grad():
@@ -143,6 +145,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--base_seed", type=int, default=42)
     parser.add_argument("--mode", type=str, default="enhanced", choices=["basic", "enhanced"])
+    parser.add_argument("--adversarial", action="store_true")
     args = parser.parse_args()
 
     set_seed(args.base_seed)
@@ -152,4 +155,4 @@ if __name__ == "__main__":
     stat_extractor = StatisticalExtractor(device)
     
     for attack in ["clean", "auth", "stat", "sem", "full"]:
-        evaluate_attack(args.language, attack, args.mode, args.limit, args.batch_size, args.base_seed, sem_extractor, stat_extractor)
+        evaluate_attack(args.language, attack, args.mode, args.limit, args.batch_size, args.base_seed, sem_extractor, stat_extractor, adversarial=args.adversarial)

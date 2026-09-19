@@ -25,6 +25,7 @@ def main():
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--base_seed", type=int, default=42)
     ap.add_argument("--mode", type=str, default="enhanced", choices=["basic", "enhanced"])
+    ap.add_argument("--adversarial", action="store_true")
     args = ap.parse_args()
 
     set_seed(args.base_seed)
@@ -46,7 +47,7 @@ def main():
         name = "authorship-enhanced"
         attack_all = False
 
-    run_attack_evaluation(args.language, name, apply_attack, args.batch_size, args.limit, args.base_seed, attack_all_samples=attack_all)
+    run_attack_evaluation(args.language, name, apply_attack, args.batch_size, args.limit, args.base_seed, attack_all_samples=attack_all, adversarial=args.adversarial)
 
 if __name__ == "__main__":
     main()

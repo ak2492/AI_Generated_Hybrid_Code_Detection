@@ -6,19 +6,21 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from torch.utils.data import DataLoader, TensorDataset
 from model import HybridCodeDetector
 
-def evaluate_model(language="python", batch_size=64):
+def evaluate_model(language="python", batch_size=64, adversarial=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Evaluating {language.upper()} on {device}...")
     
     X_test = np.load(f"{language}_test_X.npy")
     y_test = np.load(f"{language}_test_y.npy")
-    scaler = joblib.load(f"{language}_scaler.pkl")
+    scaler_file = f"{language}_adv_scaler.pkl" if adversarial else f"{language}_scaler.pkl"
+    scaler = joblib.load(scaler_file)
     X_test_scaled = scaler.transform(X_test)
     test_loader = DataLoader(TensorDataset(torch.FloatTensor(X_test_scaled), torch.FloatTensor(y_test)), batch_size=batch_size, shuffle=False)
     
     model = HybridCodeDetector().to(device)
     # Fixed map_location for cross-hardware evaluation
-    model.load_state_dict(torch.load(f"{language}_best_model.pt", map_location=device))
+    model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
+    model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
     
     all_preds, all_targets, all_probs = [], [], []
@@ -52,9 +54,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
     parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--adversarial", action="store_true")
     args = parser.parse_args()
     
     if args.batch_size is None:
         args.batch_size = 64 if args.language == "python" else (32 if args.language == "java" else 16)
             
-    evaluate_model(language=args.language, batch_size=args.batch_size)
+    evaluate_model(language=args.language, batch_size=args.batch_size, adversarial=args.adversarial)
