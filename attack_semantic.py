@@ -1,55 +1,49 @@
 """
 Semantic Attack Evaluation (Paper Sec 4.7)
 
-Radical meaning-preserving variable rename:
-  All declared variable names -> v_1, v_2, ... v_n  (deterministic, sorted).
+Basic mode  : Paper faithful — rename variables to v_1..v_n on ALL test samples.
+Enhanced    : Bug-fixed rename + string normalization (machine-generated only).
 
 Usage:
-  python attack_semantic.py --language python
-  python attack_semantic.py --language java
-  python attack_semantic.py --language cpp --limit 500
+  python attack_semantic.py --language python --mode basic
+  python attack_semantic.py --language python --mode enhanced
 """
 
 import argparse
 from tree_sitter import Parser
 from attack_utils import (
-    set_seed, get_language_config, get_ts_parser, meaning_preserving_rename,
-    meaning_preserving_rename_strong,
+    set_seed, get_language_config, get_ts_parser,
+    meaning_preserving_rename, meaning_preserving_rename_enhanced,
     run_attack_evaluation,
 )
 
 def main():
     ap = argparse.ArgumentParser(description="Semantic Attack Evaluation")
-    ap.add_argument("--language",   type=str, default="python",
-                    choices=["python", "java", "cpp"])
-    ap.add_argument("--limit",      type=int, default=None)
+    ap.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
+    ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--batch_size", type=int, default=32)
-    ap.add_argument("--base_seed",  type=int, default=42)
-    ap.add_argument("--mode", type=str, default="strong",
-                    choices=["paper", "strong"],
-                    help="'paper'=rename variables only; 'strong'=rename variables, functions, and classes (default)")
+    ap.add_argument("--base_seed", type=int, default=42)
+    ap.add_argument("--mode", type=str, default="enhanced", choices=["basic", "enhanced"])
     args = ap.parse_args()
 
     set_seed(args.base_seed)
-    config    = get_language_config(args.language)
+    config = get_language_config(args.language)
     ts_parser = get_ts_parser(config["lang_obj"])
 
-    if args.mode == "paper":
+    if args.mode == "basic":
         def apply_attack(code, idx):
-            mod, _ = meaning_preserving_rename(
-                code, ts_parser, args.language, config)
+            mod, _ = meaning_preserving_rename(code, ts_parser, args.language, config)
             return mod
-        name = "semantic-paper"
+        name = "semantic-basic"
+        attack_all = True
     else:
         def apply_attack(code, idx):
-            mod, _ = meaning_preserving_rename_strong(
-                code, ts_parser, args.language, config)
+            mod, _ = meaning_preserving_rename_enhanced(code, ts_parser, args.language, config)
             return mod
-        name = "semantic-strong"
+        name = "semantic-enhanced"
+        attack_all = False
 
-    run_attack_evaluation(args.language, name, apply_attack,
-                          args.batch_size, args.limit, args.base_seed)
-
+    run_attack_evaluation(args.language, name, apply_attack, args.batch_size, args.limit, args.base_seed, attack_all_samples=attack_all)
 
 if __name__ == "__main__":
     main()

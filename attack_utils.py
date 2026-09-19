@@ -273,76 +273,53 @@ def strip_comments_enhanced(code_str, parser, language):
         return code_str, 0
 
 
-def strip_comments_strong(code_str, parser, language, config):
-    """Strong authorship attack: removes comments/docstrings, manipulates case/spacing/layout."""
-    import random
-    rng = random.Random(42) # fixed seed for reproducibility or could use hash of code
-
-    # 1. Base enhanced strip
-    code_str, n_removed = strip_comments_enhanced(code_str, parser, language)
-    if not code_str:
-        return code_str, 0
-
-    # 2. Case Swapping (identifier nodes)
+def normalize_naming_style(code_str, parser, language, config):
     try:
+        if not code_str or len(code_str) > MAX_CODE_SIZE:
+            return code_str, 0
         code_bytes_raw = bytes(code_str, "utf8")
         tree = parser.parse(code_bytes_raw)
-        
         all_ids = [n for n in _iter_nodes(tree.root_node) if n.type == "identifier"]
-        all_ids.sort(key=lambda n: n.start_byte, reverse=True)
-
-        code_bytes = bytearray(code_bytes_raw)
-        n_case_swaps = 0
-        
+        unique_names = {}
         for node in all_ids:
             name = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
-            if not name or name in config["reserved"]:
-                continue
-                
-            new_name = name
-            if '_' in name and rng.random() < 0.5:
-                # snake_case to camelCase
-                parts = name.split('_')
-                if len(parts) > 1 and parts[0]:
-                    new_name = parts[0] + ''.join(p.capitalize() for p in parts[1:])
-            elif re.search(r'[A-Z]', name) and rng.random() < 0.5:
-                # camelCase to snake_case
-                s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
-                new_name = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
-                
-            if new_name != name:
-                code_bytes[node.start_byte:node.end_byte] = bytes(new_name, "utf8")
-                n_case_swaps += 1
-                
-        code_str = code_bytes.decode("utf8", errors="ignore")
-    except Exception as e:
-        pass
+            if not name or name in config["reserved"]: continue
+            if name not in unique_names:
+                new_name = name
+                if re.search(r'[A-Z]', name) and not name.isupper():
+                    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+                    new_name = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+                elif name.isupper() and len(name) > 1:
+                    new_name = name.lower()
+                cleaned = re.sub(r'\d+', '', new_name)
+                unique_names[name] = cleaned if (cleaned and cleaned != '_') else name.lower()
+        if not unique_names: return code_str, 0
+        all_ids.sort(key=lambda n: n.start_byte, reverse=True)
+        code_bytes = bytearray(code_bytes_raw)
+        n_changed = 0
+        for node in all_ids:
+            name = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
+            if name in unique_names and unique_names[name] != name:
+                code_bytes[node.start_byte:node.end_byte] = bytes(unique_names[name], "utf8")
+                n_changed += 1
+        return code_bytes.decode("utf8", errors="ignore"), n_changed
+    except Exception: return code_str, 0
 
-    # 3. Layout / Spacing manipulation
+def normalize_layout(code_str, language):
     lines = code_str.split("\n")
     new_lines = []
     for line in lines:
-        # Operator spacing
-        if rng.random() < 0.3:
-            # remove spaces around operators
-            line = re.sub(r'\s*([=+\-*/<>!&|%^]+)\s*', r'\1', line)
-        elif rng.random() < 0.3:
-            # add spaces around operators
-            line = re.sub(r'([=+\-*/<>!&|%^]+)', r' \1 ', line)
-            
-        # Tab/Space mix
-        if rng.random() < 0.2:
-            line = line.replace('    ', '\t')
-        elif rng.random() < 0.2:
-            line = line.replace('\t', '    ')
-            
-        new_lines.append(line)
-        
-        # Inject empty line
-        if rng.random() < 0.05:
-            new_lines.append("")
+        if not line.strip(): continue
+        leading = len(line) - len(line.lstrip())
+        indent_chars = line[:leading]
+        indent_level = indent_chars.count('\t') + (indent_chars.count(' ') // 4)
+        normalized_indent = "    " * indent_level
+        content = line.strip()
+        content = re.sub(r'\s*(==|!=|<=|>=|<<|>>|&&|\|\||[=+\-*/<>!&|%^])\s*', r' \1 ', content)
+        content = re.sub(r'\s+', ' ', content).strip()
+        new_lines.append(normalized_indent + content)
+    return "\n".join(new_lines)
 
-    return "\n".join(new_lines), n_removed + n_case_swaps
 
 def meaning_preserving_rename(code_str, parser, language, config):
     """Paper Sec 4.7 — Semantic Layer: rename variables to v_1 … v_n.
@@ -390,52 +367,88 @@ def meaning_preserving_rename(code_str, parser, language, config):
         return code_str, 0
 
 
-def meaning_preserving_rename_strong(code_str, parser, language, config):
-    """Strong Semantic Layer: rename variables, functions, and classes."""
+# Built-in protection sets
+PYTHON_BUILTINS = {"print", "len", "range", "int", "str", "float", "list", "dict", "set", "tuple", "bool", "type", "object", "super", "self", "cls", "None", "True", "False", "open", "input", "map", "filter", "zip", "enumerate", "sorted", "reversed", "min", "max", "sum", "abs", "any", "all", "isinstance", "issubclass", "hasattr", "getattr", "setattr", "delattr", "property", "staticmethod", "classmethod", "Exception", "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError", "RuntimeError", "StopIteration", "os", "sys", "re", "math", "json", "io", "collections", "itertools", "functools", "datetime", "pathlib", "typing", "abc", "copy", "logging", "warnings", "traceback", "unittest", "pytest", "__init__", "__str__", "__repr__", "__len__", "__getitem__", "__setitem__", "__contains__", "__iter__", "__next__", "__enter__", "__exit__", "__call__", "__name__", "__main__", "__file__", "__doc__", "__class__"}
+CPP_BUILTINS = {"main", "std", "cout", "cin", "endl", "cerr", "clog", "string", "vector", "map", "set", "list", "pair", "queue", "stack", "deque", "array", "bitset", "tuple", "printf", "scanf", "malloc", "free", "begin", "end", "size", "push_back", "pop_back", "front", "back", "first", "second", "insert", "erase", "find", "count", "sort", "swap", "move", "forward", "make_pair", "make_tuple", "unique_ptr", "shared_ptr", "weak_ptr", "make_unique", "make_shared", "size_t", "ptrdiff_t", "iterator", "const_iterator", "exception", "runtime_error", "logic_error", "invalid_argument"}
+JAVA_BUILTINS = {"main", "System", "out", "println", "print", "String", "Integer", "Double", "Float", "Boolean", "Character", "Long", "Short", "Byte", "Object", "Class", "Math", "Arrays", "Collections", "List", "Map", "Set", "ArrayList", "HashMap", "HashSet", "LinkedList", "TreeMap", "Iterator", "Comparable", "Comparator", "Runnable", "Thread", "Exception", "RuntimeException", "IOException", "NullPointerException", "Override", "Deprecated", "toString", "equals", "hashCode", "compareTo", "length", "size", "get", "put", "add", "remove", "contains", "isEmpty", "toArray", "valueOf", "parseInt", "parseDouble", "StringBuilder", "StringBuffer", "Scanner", "BufferedReader"}
+LANG_BUILTINS = {"python": PYTHON_BUILTINS, "java": JAVA_BUILTINS, "cpp": CPP_BUILTINS}
+LANG_ID_TYPES = {"python": {"identifier"}, "java": {"identifier", "type_identifier"}, "cpp": {"identifier", "type_identifier", "field_identifier", "namespace_identifier"}}
+ENHANCED_VAR_PARENTS = {
+    "python": {"assignment", "ann_assign", "parameters", "for_statement", "for_in_clause", "with_statement", "except_clause", "pattern_list", "named_expression", "as_pattern", "typed_parameter", "default_parameter", "function_definition", "class_definition", "global_statement", "nonlocal_statement"},
+    "java": {"variable_declarator", "formal_parameter", "catch_formal_parameter", "spread_parameter", "field_declaration", "enhanced_for_statement", "resource", "method_declaration", "class_declaration", "constructor_declaration"},
+    "cpp": {"init_declarator", "parameter_declaration", "declaration", "for_range_loop", "condition_clause", "declarator", "function_declarator", "function_definition", "class_specifier", "struct_specifier"}
+}
+
+def meaning_preserving_rename_enhanced(code_str, parser, language, config):
     try:
-        if not code_str or len(code_str) > MAX_CODE_SIZE:
-            return code_str, 0
+        if not code_str or len(code_str) > MAX_CODE_SIZE: return code_str, 0
         code_bytes_raw = bytes(code_str, "utf8")
         tree = parser.parse(code_bytes_raw)
+        n_transforms = 0
+        id_types = LANG_ID_TYPES[language]
+        builtins = LANG_BUILTINS.get(language, set())
+        allowed = ENHANCED_VAR_PARENTS[language]
         
-        # Extend allowed types to include function and class definitions
-        allowed = set(VAR_PARENTS[language])
-        if language == "python":
-            allowed.update({"function_definition", "class_definition"})
-        elif language == "java":
-            allowed.update({"method_declaration", "class_declaration"})
-        elif language == "cpp":
-            allowed.update({"function_definition", "class_specifier", "struct_specifier"})
-
         target_names = set()
-        for node in _iter_nodes(tree.root_node):
-            if node.type == "identifier":
-                pt = node.parent.type if node.parent else ""
-                if pt in allowed:
-                    name = code_bytes_raw[node.start_byte:node.end_byte] \
-                               .decode("utf8", errors="ignore")
-                    if name and name not in config["reserved"]:
-                        target_names.add(name)
-        if not target_names:
-            return code_str, 0
-
+        all_id_nodes = [n for n in _iter_nodes(tree.root_node) if n.type in id_types]
+        
+        for node in all_id_nodes:
+            pt = node.parent.type if node.parent else ""
+            if pt in allowed:
+                name = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
+                if name and name not in config["reserved"] and name not in builtins and not name.startswith("__"):
+                    target_names.add(name)
+        
+        if not target_names: return code_str, 0
         var_map = {n: f"v_{i+1}" for i, n in enumerate(sorted(target_names))}
-
-        all_ids = [n for n in _iter_nodes(tree.root_node)
-                   if n.type == "identifier"]
-        all_ids.sort(key=lambda n: n.start_byte, reverse=True)
-
+        all_id_nodes.sort(key=lambda n: n.start_byte, reverse=True)
         code_bytes = bytearray(code_bytes_raw)
-        for node in all_ids:
-            name = code_bytes_raw[node.start_byte:node.end_byte] \
-                       .decode("utf8", errors="ignore")
+        for node in all_id_nodes:
+            name = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
             if name in var_map:
-                code_bytes[node.start_byte:node.end_byte] = \
-                    bytes(var_map[name], "utf8")
+                code_bytes[node.start_byte:node.end_byte] = bytes(var_map[name], "utf8")
+                n_transforms += 1
+        code_str = code_bytes.decode("utf8", errors="ignore")
+        
+        code_bytes_raw = bytes(code_str, "utf8")
+        tree = parser.parse(code_bytes_raw)
+        string_types = {"string", "string_literal", "concatenated_string", "template_string", "raw_string_literal"}
+        string_nodes = [n for n in _iter_nodes(tree.root_node) if n.type in string_types and (not n.parent or n.parent.type != "expression_statement")]
+        
+        if string_nodes:
+            string_nodes.sort(key=lambda n: n.start_byte, reverse=True)
+            code_bytes = bytearray(code_bytes_raw)
+            for node in string_nodes:
+                original = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
+                if original.startswith('"""') or original.startswith("'''"): continue
+                elif original.startswith('"'): replacement = '"s"'
+                elif original.startswith("'"): replacement = "'s'"
+                else: continue
+                code_bytes[node.start_byte:node.end_byte] = bytes(replacement, "utf8")
+                n_transforms += 1
+            code_str = code_bytes.decode("utf8", errors="ignore")
+        
+        if language == "python": code_str = re.sub(r'print\s*\(([^)]*)\)', 'print("output")', code_str)
+        elif language == "java": code_str = re.sub(r'System\.out\.println\s*\(([^)]*)\)', 'System.out.println("output")', code_str)
+        elif language == "cpp": code_str = re.sub(r'(std::)?cout\s*<<[^;]*;', 'std::cout << "output" << std::endl;', code_str)
+        return code_str, n_transforms
+    except Exception: return code_str, 0
 
-        return code_bytes.decode("utf8", errors="ignore"), len(target_names)
-    except Exception:
-        return code_str, 0
+
+def apply_statistical_attack_basic(code_str, rng):
+    lines = code_str.split("\n")
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped:
+            indent = " " * rng.choice([0, 1, 2, 4])
+            trailing = (" " * rng.choice([0, 0, 1, 1, 2]) if rng.random() < 0.5 else "")
+            new_lines.append(indent + stripped + trailing)
+            if rng.random() < 0.05:
+                new_lines.append("")
+        else:
+            new_lines.append(line)
+    return "\n".join(new_lines)
 
 
 def apply_statistical_attack(code_str, rng):
@@ -490,8 +503,9 @@ def safe_extract_authorship(code, auth_parser_fn):
 # =========================================================================
 
 def run_attack_evaluation(language, attack_name, apply_attack_fn,
-                          batch_size=32, limit=None, base_seed=42):
-    """End-to-end pipeline: load data → attack → extract → evaluate.
+                          batch_size=32, limit=None, base_seed=42,
+                          attack_all_samples=False):
+    """End-to-end pipeline
 
     Parameters
     ----------
@@ -526,7 +540,7 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     n_mod = 0
     for idx, (code, label) in enumerate(tqdm(zip(codes, labels), desc="Attacking",
                                     total=len(codes), unit="snippet", leave=True)):
-        if label == 1:
+        if attack_all_samples or label == 1:
             try:
                 mod = apply_attack_fn(code, idx)
             except Exception:
@@ -537,7 +551,9 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
         if mod != code:
             n_mod += 1
         attacked.append(mod)
-    print(f"  Modified {n_mod}/{n_machine} machine samples (total test size: {len(codes)})")
+    
+    target_count = len(codes) if attack_all_samples else sum(labels)
+    print(f"  Modified {n_mod}/{target_count} samples ({'all' if attack_all_samples else 'machine-only'}) (total test size: {len(codes)})")
 
     # ---- 3a. Semantic embeddings (CodeT5+) --------------------------------
     print("\nPhase 1/3: CodeT5+ semantic embeddings …")
