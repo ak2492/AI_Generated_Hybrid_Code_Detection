@@ -321,52 +321,6 @@ def normalize_layout(code_str, language):
     return "\n".join(new_lines)
 
 
-def meaning_preserving_rename(code_str, parser, language, config):
-    """Paper Sec 4.7 — Semantic Layer: rename variables to v_1 … v_n.
-
-    Deterministic (sorted names → sequential v_i) for reproducibility.
-    Uses iterative traversal.  Returns (new_code, n_distinct_names).
-    """
-    try:
-        if not code_str or len(code_str) > MAX_CODE_SIZE:
-            return code_str, 0
-        code_bytes_raw = bytes(code_str, "utf8")
-        tree = parser.parse(code_bytes_raw)
-        allowed = VAR_PARENTS[language]
-
-        # 1. collect unique declared-variable names
-        target_names = set()
-        for node in _iter_nodes(tree.root_node):
-            if node.type == "identifier":
-                pt = node.parent.type if node.parent else ""
-                if pt in allowed:
-                    name = code_bytes_raw[node.start_byte:node.end_byte] \
-                               .decode("utf8", errors="ignore")
-                    if name and name not in config["reserved"]:
-                        target_names.add(name)
-        if not target_names:
-            return code_str, 0
-
-        var_map = {n: f"v_{i+1}" for i, n in enumerate(sorted(target_names))}
-
-        # 2. replace every matching identifier occurrence (reverse order)
-        all_ids = [n for n in _iter_nodes(tree.root_node)
-                   if n.type == "identifier"]
-        all_ids.sort(key=lambda n: n.start_byte, reverse=True)
-
-        code_bytes = bytearray(code_bytes_raw)
-        for node in all_ids:
-            name = code_bytes_raw[node.start_byte:node.end_byte] \
-                       .decode("utf8", errors="ignore")
-            if name in var_map:
-                code_bytes[node.start_byte:node.end_byte] = \
-                    bytes(var_map[name], "utf8")
-
-        return code_bytes.decode("utf8", errors="ignore"), len(target_names)
-    except Exception:
-        return code_str, 0
-
-
 # Built-in protection sets
 PYTHON_BUILTINS = {"print", "len", "range", "int", "str", "float", "list", "dict", "set", "tuple", "bool", "type", "object", "super", "self", "cls", "None", "True", "False", "open", "input", "map", "filter", "zip", "enumerate", "sorted", "reversed", "min", "max", "sum", "abs", "any", "all", "isinstance", "issubclass", "hasattr", "getattr", "setattr", "delattr", "property", "staticmethod", "classmethod", "Exception", "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError", "RuntimeError", "StopIteration", "os", "sys", "re", "math", "json", "io", "collections", "itertools", "functools", "datetime", "pathlib", "typing", "abc", "copy", "logging", "warnings", "traceback", "unittest", "pytest", "__init__", "__str__", "__repr__", "__len__", "__getitem__", "__setitem__", "__contains__", "__iter__", "__next__", "__enter__", "__exit__", "__call__", "__name__", "__main__", "__file__", "__doc__", "__class__"}
 CPP_BUILTINS = {"main", "std", "cout", "cin", "endl", "cerr", "clog", "string", "vector", "map", "set", "list", "pair", "queue", "stack", "deque", "array", "bitset", "tuple", "printf", "scanf", "malloc", "free", "begin", "end", "size", "push_back", "pop_back", "front", "back", "first", "second", "insert", "erase", "find", "count", "sort", "swap", "move", "forward", "make_pair", "make_tuple", "unique_ptr", "shared_ptr", "weak_ptr", "make_unique", "make_shared", "size_t", "ptrdiff_t", "iterator", "const_iterator", "exception", "runtime_error", "logic_error", "invalid_argument"}
@@ -378,6 +332,65 @@ ENHANCED_VAR_PARENTS = {
     "java": {"variable_declarator", "formal_parameter", "catch_formal_parameter", "spread_parameter", "field_declaration", "enhanced_for_statement", "resource", "method_declaration", "class_declaration", "constructor_declaration"},
     "cpp": {"init_declarator", "parameter_declaration", "declaration", "for_range_loop", "condition_clause", "declarator", "function_declarator", "function_definition", "class_specifier", "struct_specifier"}
 }
+
+
+def meaning_preserving_rename(code_str, parser, language, config):
+    """Paper Sec 4.7 — Semantic Layer: rename variables to v_1 … v_n.
+
+    Deterministic (sorted names → sequential v_i) for reproducibility.
+    Uses iterative traversal. Builtins and keywords are protected.
+    Returns (new_code, n_distinct_names).
+    """
+    try:
+        if not code_str or len(code_str) > MAX_CODE_SIZE:
+            return code_str, 0
+        code_bytes_raw = bytes(code_str, "utf8")
+        tree = parser.parse(code_bytes_raw)
+        allowed = VAR_PARENTS[language]
+        builtins = LANG_BUILTINS.get(language, set())
+
+        # 1. collect unique declared-variable names
+        target_names = set()
+        for node in _iter_nodes(tree.root_node):
+            if node.type == "identifier":
+                pt = node.parent.type if node.parent else ""
+                if pt in allowed:
+                    name = code_bytes_raw[node.start_byte:node.end_byte] \
+                               .decode("utf8", errors="ignore")
+                    if name and name not in config["reserved"] and name not in builtins and not name.startswith("__"):
+                        target_names.add(name)
+        if not target_names:
+            return code_str, 0
+
+        var_map = {n: f"v_{i+1}" for i, n in enumerate(sorted(target_names))}
+
+        # 2. replace matching identifier occurrences (reverse order)
+        all_ids = [n for n in _iter_nodes(tree.root_node)
+                   if n.type == "identifier"]
+        all_ids.sort(key=lambda n: n.start_byte, reverse=True)
+
+        code_bytes = bytearray(code_bytes_raw)
+        for node in all_ids:
+            # Skip member/attribute access names (e.g. obj.target_name)
+            if node.parent:
+                pt = node.parent.type
+                if language == "python" and pt == "attribute" and node.parent.children[-1] == node:
+                    continue
+                elif language == "java" and pt in ["field_access", "method_invocation"] and node.parent.children[-1] == node:
+                    continue
+                elif language == "cpp" and pt in ["field_expression"] and node.parent.children[-1] == node:
+                    continue
+
+            name = code_bytes_raw[node.start_byte:node.end_byte] \
+                       .decode("utf8", errors="ignore")
+            if name in var_map:
+                code_bytes[node.start_byte:node.end_byte] = \
+                    bytes(var_map[name], "utf8")
+
+        return code_bytes.decode("utf8", errors="ignore"), len(target_names)
+    except Exception:
+        return code_str, 0
+
 
 def meaning_preserving_rename_enhanced(code_str, parser, language, config):
     try:
@@ -435,19 +448,55 @@ def meaning_preserving_rename_enhanced(code_str, parser, language, config):
     except Exception: return code_str, 0
 
 
-def apply_statistical_attack_basic(code_str, rng):
+def apply_statistical_attack_basic(code_str, rng, language="python"):
+    """Paper Sec 4.7 — Statistical Layer: disrupt visual regularities.
+
+    Disrupts layout regularities (indentation style, trailing whitespace, blank lines)
+    while strictly preserving valid code syntax and functional logic.
+    """
     lines = code_str.split("\n")
     new_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped:
-            indent = " " * rng.choice([0, 1, 2, 4])
-            trailing = (" " * rng.choice([0, 0, 1, 1, 2]) if rng.random() < 0.5 else "")
-            new_lines.append(indent + stripped + trailing)
-            if rng.random() < 0.05:
-                new_lines.append("")
-        else:
-            new_lines.append(line)
+
+    if language == "python":
+        # In Python, indentation syntax defines blocks and cannot be randomized blindly line-by-line.
+        # Paper Sec 4.7: "disrupts visual regularities through randomized end-of-line whitespace,
+        # uneven indentation, and the injection of blank lines."
+        indent_style = rng.choice(["two_space", "tab", "three_space", "four_space"])
+        for line in lines:
+            stripped = line.strip()
+            if stripped:
+                leading = len(line) - len(line.lstrip())
+                indent_level = leading // 4
+                if indent_style == "two_space":
+                    base_indent = "  " * indent_level
+                elif indent_style == "tab":
+                    base_indent = "\t" * indent_level
+                elif indent_style == "three_space":
+                    base_indent = "   " * indent_level
+                else:
+                    base_indent = "    " * indent_level
+
+                trailing = " " * rng.randint(1, 4) if rng.random() < 0.8 else ""
+                new_lines.append(base_indent + stripped + trailing)
+                if rng.random() < 0.10:
+                    new_lines.append("")
+            else:
+                if rng.random() < 0.5:
+                    new_lines.append("")
+    else:
+        # Java / C++: Braces define blocks, so line indentation can vary freely
+        for line in lines:
+            stripped = line.strip()
+            if stripped:
+                indent = " " * rng.randint(0, 8)
+                trailing = " " * rng.randint(1, 4) if rng.random() < 0.8 else ""
+                new_lines.append(indent + stripped + trailing)
+                if rng.random() < 0.10:
+                    new_lines.append("")
+            else:
+                if rng.random() < 0.5:
+                    new_lines.append("")
+
     return "\n".join(new_lines)
 
 
@@ -504,38 +553,45 @@ def safe_extract_authorship(code, auth_parser_fn):
 
 def run_attack_evaluation(language, attack_name, apply_attack_fn,
                           batch_size=32, limit=None, base_seed=42,
-                          attack_all_samples=False, adversarial=False):
-    """End-to-end pipeline
+                          attack_all_samples=False, adversarial=False,
+                          attack_layer="full", mode="enhanced",
+                          transductive_scaler=False, clean_cache=None):
+    """End-to-end evaluation pipeline supporting isolated (paper Sec 4.7) and full attacks.
 
     Parameters
     ----------
-    language       : "python" | "java" | "cpp"
-    attack_name    : display name (e.g. "authorship", "statistical")
-    apply_attack_fn: callable(code: str, idx: int) -> str
-    batch_size     : batch size for CodeT5+ / CodeBERT
-    limit          : optional cap on test-set size (for quick debugging)
-    base_seed      : random seed
+    language           : "python" | "java" | "cpp"
+    attack_name        : display name (e.g. "authorship", "statistical")
+    apply_attack_fn    : callable(code: str, idx: int) -> str
+    batch_size         : batch size for CodeT5+ / CodeBERT
+    limit              : optional cap on test-set size (for quick debugging)
+    base_seed          : random seed
+    attack_all_samples : whether to attack all samples or machine samples only
+    adversarial        : whether to evaluate the adversarially fine-tuned model
+    attack_layer       : "auth" | "stat" | "sem" | "full" | "clean"
+    mode               : "basic" (paper faithful) | "enhanced"
+    transductive_scaler: whether to fit StandardScaler on test set (for diagnostic testing)
+    clean_cache        : optional pre-extracted (clean_sem, clean_stat, clean_auth) tuple
     """
     set_seed(base_seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"\n{'=' * 60}")
-    print(f"  {attack_name.upper()} ATTACK  [{language.upper()}]")
-    print(f"  device={device}  batch={batch_size}  seed={base_seed}")
+    print(f"  {attack_name.upper()} ATTACK  [{language.upper()}] (MODE: {mode.upper()})")
+    print(f"  device={device}  batch={batch_size}  layer={attack_layer}  seed={base_seed}")
     print(f"{'=' * 60}")
 
     # ---- 1. Load test data ------------------------------------------------
     codes, labels = load_code_data(language=language, split="test", limit=limit)
     if not codes:
-        print("ERROR: No data loaded.  Exiting.")
-        return
+        print("ERROR: No data loaded. Exiting.")
+        return None
     labels = np.array(labels)
     n_human   = int((labels == 0).sum())
     n_machine = int((labels == 1).sum())
-    print(f"Test set: {len(codes)} samples  "
-          f"({n_human} human / {n_machine} machine)")
+    print(f"Test set: {len(codes)} samples ({n_human} human / {n_machine} machine)")
 
-    # ---- 2. Apply attack --------------------------------------------------
+    # ---- 2. Apply attack transformation -----------------------------------
     attacked = []
     n_mod = 0
     for idx, (code, label) in enumerate(tqdm(zip(codes, labels), desc="Attacking",
@@ -555,59 +611,114 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     target_count = len(codes) if attack_all_samples else sum(labels)
     print(f"  Modified {n_mod}/{target_count} samples ({'all' if attack_all_samples else 'machine-only'}) (total test size: {len(codes)})")
 
-    # ---- 3a. Semantic embeddings (CodeT5+) --------------------------------
-    print("\nPhase 1/3: CodeT5+ semantic embeddings …")
-    sem = SemanticExtractor(device)
-    all_sem = []
-    for i in tqdm(range(0, len(attacked), batch_size),
-                  desc="CodeT5+", unit="batch", leave=True):
-        batch = [c[:MAX_CODE_SIZE_TRANSFORMER] for c in attacked[i:i+batch_size]]
-        all_sem.append(sem.extract_batch(batch))
-    del sem; gc.collect(); torch.cuda.empty_cache()
+    # ---- 3. Feature Assembly (Isolated vs Full) ---------------------------
+    # Paper Sec 4.7: In basic mode with single-layer attack, only the target feature group
+    # is modified, while other feature groups remain intact from the clean code.
+    is_isolated = (mode == "basic" and attack_layer in ["auth", "stat", "sem"])
 
-    # ---- 3b. Statistical metrics (CodeBERT) -------------------------------
-    print("Phase 2/3: CodeBERT statistical metrics …")
-    stat = StatisticalExtractor(device)
-    all_stat = []
-    for i in tqdm(range(0, len(attacked), batch_size),
-                  desc="CodeBERT", unit="batch", leave=True):
-        batch = [c[:MAX_CODE_SIZE_TRANSFORMER] for c in attacked[i:i+batch_size]]
-        all_stat.append(stat.extract_batch(batch))
-    del stat; gc.collect(); torch.cuda.empty_cache()
+    clean_sem, clean_stat, clean_auth = None, None, None
+    if is_isolated:
+        if clean_cache is not None:
+            clean_sem, clean_stat, clean_auth = clean_cache
+        else:
+            clean_file = f"{language}_test_X.npy"
+            if os.path.exists(clean_file):
+                cached_X = np.load(clean_file)
+                if limit:
+                    cached_X = cached_X[:limit]
+                if cached_X.shape[0] == len(codes) and cached_X.shape[1] == 813:
+                    clean_sem = cached_X[:, :768]
+                    clean_stat = cached_X[:, 768:775]
+                    clean_auth = cached_X[:, 775:813]
+                    print(f"  Loaded clean baseline features from {clean_file}")
 
-    # ---- 3c. Authorship features (AST) ------------------------------------
-    print("Phase 3/3: AST authorship features …")
-    auth_fn  = get_auth_parser(language)
-    all_auth = []
-    n_fail   = 0
-    for c in tqdm(attacked, desc="AST", unit="snippet", leave=True):
-        feat = safe_extract_authorship(c, auth_fn)
-        if np.all(feat == 0) and c and c.strip():
-            n_fail += 1
-        all_auth.append(feat)
-    if n_fail:
-        print(f"  ⚠ AST parsing returned zeros for {n_fail} non-empty samples")
+    # 3a. Semantic embeddings (CodeT5+)
+    if is_isolated and attack_layer != "sem":
+        if clean_sem is None:
+            print("\nPhase 1/3: CodeT5+ semantic embeddings (clean baseline cache) …")
+            sem = SemanticExtractor(device)
+            all_clean_sem = []
+            for i in tqdm(range(0, len(codes), batch_size), desc="CodeT5+ (clean)", unit="batch", leave=True):
+                batch = [c[:MAX_CODE_SIZE_TRANSFORMER] for c in codes[i:i+batch_size]]
+                all_clean_sem.append(sem.extract_batch(batch))
+            clean_sem = np.vstack(all_clean_sem)
+            del sem; gc.collect(); torch.cuda.empty_cache()
+        sem_feature = clean_sem
+    else:
+        print("\nPhase 1/3: CodeT5+ semantic embeddings …")
+        sem = SemanticExtractor(device)
+        all_sem = []
+        for i in tqdm(range(0, len(attacked), batch_size), desc="CodeT5+", unit="batch", leave=True):
+            batch = [c[:MAX_CODE_SIZE_TRANSFORMER] for c in attacked[i:i+batch_size]]
+            all_sem.append(sem.extract_batch(batch))
+        sem_feature = np.vstack(all_sem)
+        del sem; gc.collect(); torch.cuda.empty_cache()
+
+    # 3b. Statistical metrics (CodeBERT)
+    if is_isolated and attack_layer != "stat":
+        if clean_stat is None:
+            print("Phase 2/3: CodeBERT statistical metrics (clean baseline cache) …")
+            stat = StatisticalExtractor(device)
+            all_clean_stat = []
+            for i in tqdm(range(0, len(codes), batch_size), desc="CodeBERT (clean)", unit="batch", leave=True):
+                batch = [c[:MAX_CODE_SIZE_TRANSFORMER] for c in codes[i:i+batch_size]]
+                all_clean_stat.append(stat.extract_batch(batch))
+            clean_stat = np.vstack(all_clean_stat)
+            del stat; gc.collect(); torch.cuda.empty_cache()
+        stat_feature = clean_stat
+    else:
+        print("Phase 2/3: CodeBERT statistical metrics …")
+        stat = StatisticalExtractor(device)
+        all_stat = []
+        for i in tqdm(range(0, len(attacked), batch_size), desc="CodeBERT", unit="batch", leave=True):
+            batch = [c[:MAX_CODE_SIZE_TRANSFORMER] for c in attacked[i:i+batch_size]]
+            all_stat.append(stat.extract_batch(batch))
+        stat_feature = np.vstack(all_stat)
+        del stat; gc.collect(); torch.cuda.empty_cache()
+
+    # 3c. Authorship features (AST)
+    if is_isolated and attack_layer != "auth":
+        if clean_auth is None:
+            print("Phase 3/3: AST authorship features (clean baseline cache) …")
+            auth_fn = get_auth_parser(language)
+            clean_auth = np.array([safe_extract_authorship(c, auth_fn) for c in tqdm(codes, desc="AST (clean)", unit="snippet", leave=True)])
+        auth_feature = clean_auth
+    else:
+        print("Phase 3/3: AST authorship features …")
+        auth_fn = get_auth_parser(language)
+        all_auth = []
+        n_fail = 0
+        for c in tqdm(attacked, desc="AST", unit="snippet", leave=True):
+            feat = safe_extract_authorship(c, auth_fn)
+            if np.all(feat == 0) and c and c.strip():
+                n_fail += 1
+            all_auth.append(feat)
+        if n_fail:
+            print(f"  ⚠ AST parsing returned zeros for {n_fail} non-empty samples")
+        auth_feature = np.array(all_auth)
 
     # ---- 4. Assemble feature matrix [sem_768 | stat_7 | auth_38] = 813 ----
-    X = np.hstack((np.vstack(all_sem),
-                   np.vstack(all_stat),
-                   np.array(all_auth)))
-    print(f"  Feature matrix: {X.shape}")
+    X = np.hstack((sem_feature, stat_feature, auth_feature))
+    print(f"  Feature matrix assembled: {X.shape} (isolated={is_isolated})")
 
-    scaler_file = f"{language}_adv_scaler.pkl" if adversarial else f"{language}_scaler.pkl"
-    scaler = joblib.load(scaler_file)
-    X_scaled = scaler.transform(X)
+    if transductive_scaler:
+        from sklearn.preprocessing import StandardScaler
+        print("  Applying transductive test-set scaling (diagnostic mode) …")
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+    else:
+        scaler_file = f"{language}_adv_scaler.pkl" if adversarial else f"{language}_scaler.pkl"
+        scaler = joblib.load(scaler_file)
+        X_scaled = scaler.transform(X)
 
     # ---- 5. Inference -----------------------------------------------------
     model = HybridCodeDetector().to(device)
     model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
-    model.load_state_dict(
-        torch.load(model_file, map_location=device))
+    model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 
     with torch.no_grad():
-        probs = model(torch.FloatTensor(X_scaled).to(device)) \
-                    .cpu().numpy().flatten()
+        probs = model(torch.FloatTensor(X_scaled).to(device)).cpu().numpy().flatten()
         preds = (probs >= 0.5).astype(int)
 
     # ---- 6. Metrics -------------------------------------------------------
@@ -615,8 +726,7 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     f1   = f1_score(labels, preds, zero_division=0)
     prec = precision_score(labels, preds, zero_division=0)
     rec  = recall_score(labels, preds, zero_division=0)
-    roc  = (roc_auc_score(labels, probs)
-            if len(np.unique(labels)) > 1 else 0.0)
+    roc  = roc_auc_score(labels, probs) if len(np.unique(labels)) > 1 else 0.0
     tn, fp, fn, tp = confusion_matrix(labels, preds, labels=[0, 1]).ravel()
     fpr = fp / max(1, fp + tn)
 
@@ -624,17 +734,21 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     mm = labels == 1   # machine mask
 
     print(f"\n{'=' * 60}")
-    print(f"  RESULTS: {attack_name.upper()}  [{language.upper()}]")
+    print(f"  RESULTS: {attack_name.upper()} [{language.upper()}] (MODE: {mode.upper()})")
     print(f"{'=' * 60}")
     print(f"  Accuracy : {acc:.4f}   F1 : {f1:.4f}   AUC : {roc:.4f}")
     print(f"  Precision: {prec:.4f}   Recall: {rec:.4f}   FPR : {fpr:.4f}")
     print(f"  Confusion:  TN={tn}  FP={fp}  FN={fn}  TP={tp}")
     print()
     print(f"  Probability distribution (diagnostic):")
-    print(f"    Human   → mean={probs[hm].mean():.4f}  "
-          f"std={probs[hm].std():.4f}  "
-          f"predicted-machine={float((probs[hm] >= 0.5).mean()):.4f}")
-    print(f"    Machine → mean={probs[mm].mean():.4f}  "
-          f"std={probs[mm].std():.4f}  "
-          f"predicted-machine={float((probs[mm] >= 0.5).mean()):.4f}")
+    print(f"    Human   → mean={probs[hm].mean():.4f}  std={probs[hm].std():.4f}  predicted-machine={float((probs[hm] >= 0.5).mean()):.4f}")
+    print(f"    Machine → mean={probs[mm].mean():.4f}  std={probs[mm].std():.4f}  predicted-machine={float((probs[mm] >= 0.5).mean()):.4f}")
     print(f"{'=' * 60}\n")
+
+    return {
+        "accuracy": acc, "f1": f1, "auc": roc,
+        "precision": prec, "recall": rec, "fpr": fpr,
+        "tn": tn, "fp": fp, "fn": fn, "tp": tp,
+        "probs": probs, "preds": preds, "labels": labels,
+        "features": (sem_feature, stat_feature, auth_feature)
+    }

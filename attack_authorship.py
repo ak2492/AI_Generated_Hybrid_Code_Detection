@@ -24,8 +24,10 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--base_seed", type=int, default=42)
-    ap.add_argument("--mode", type=str, default="enhanced", choices=["basic", "enhanced"])
+    ap.add_argument("--mode", type=str, default="basic", choices=["basic", "enhanced"])
     ap.add_argument("--adversarial", action="store_true")
+    ap.add_argument("--target", type=str, default="machine", choices=["machine", "all"], help="Which test samples to attack ('machine' per paper Sec 4.7, or 'all')")
+    ap.add_argument("--transductive_scaler", action="store_true", help="Fit StandardScaler on test set instead of loading train scaler")
     args = ap.parse_args()
 
     set_seed(args.base_seed)
@@ -37,7 +39,8 @@ def main():
             mod, _ = strip_comments(code, ts_parser)
             return mod
         name = "authorship-basic"
-        attack_all = True
+        attack_all = (args.target == "all")
+        attack_layer = "auth"
     else:
         def apply_attack(code, idx):
             mod, _ = strip_comments_enhanced(code, ts_parser, args.language)
@@ -46,8 +49,13 @@ def main():
             return mod
         name = "authorship-enhanced"
         attack_all = False
+        attack_layer = "full"
 
-    run_attack_evaluation(args.language, name, apply_attack, args.batch_size, args.limit, args.base_seed, attack_all_samples=attack_all, adversarial=args.adversarial)
+    run_attack_evaluation(
+        args.language, name, apply_attack, args.batch_size, args.limit, args.base_seed,
+        attack_all_samples=attack_all, adversarial=args.adversarial,
+        attack_layer=attack_layer, mode=args.mode, transductive_scaler=args.transductive_scaler
+    )
 
 if __name__ == "__main__":
     main()
