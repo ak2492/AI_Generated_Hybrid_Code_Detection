@@ -159,6 +159,13 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
         print(f"[resume] kept {len(prev)} existing rows for other configs.")
 
     for seed in seeds:
+        # I start each seed from a clean memory state because 5 seeds of
+        # CodeT5+/CodeBERT alloc/free cycles fragment VRAM; the reset also
+        # keeps peak stats honest.
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
         print("\n" + "=" * 85)
         print(f"SEED {seed} [{language.upper()} {tag}]")
         print("=" * 85)
@@ -222,6 +229,15 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                             "Throughput": res["Throughput"],
                             "PeakRAM_MB": res.get("PeakRAM_MB", 0.0),
                             "N": len(res["labels"])})
+            # I free the suite result here because it carries full feature
+            # arrays (test set x 813-d); only scalars were copied into rows.
+            del res
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        # I drop the last attack closure here because it retains the
+        # tree-sitter parser via closure; next seed builds its own.
+        del fn
 
         if not skip_external:
             _restore()
@@ -230,6 +246,10 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                                        base_seed=base_seed, adversarial=adversarial)
             for scenario, res in ext_results.items():
                 _row(scenario, res)
+            del ext_results
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if out_csv:
             pd.DataFrame(rows, columns=COLUMNS).to_csv(out_csv, index=False)
