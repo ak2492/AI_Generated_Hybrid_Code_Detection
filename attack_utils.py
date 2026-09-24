@@ -19,10 +19,25 @@ import sys
 import warnings
 import gc
 import random
+import time
 import numpy as np
 import torch
 import joblib
 import re
+
+try:
+    import psutil as _psutil
+    _psutil_proc = _psutil.Process()
+except ImportError:  # I fall back to 0.0 here so Kaggle runs without psutil still work.
+    _psutil = None
+    _psutil_proc = None
+
+
+def current_rss_mb():
+    """Current process RSS in MB (0.0 if psutil unavailable). Identical to CPG helper."""
+    if _psutil_proc is None:
+        return 0.0
+    return _psutil_proc.memory_info().rss / (1024 * 1024)
 
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -743,6 +758,12 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     set_seed(base_seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # I time every stage like the CPG cost helper so both folders report the
+    # same Latency_ms / Throughput / PeakRAM_MB cost keys.
+    t_total_start = time.perf_counter()
+    rss_start = current_rss_mb()
+    t_attack = t_sem = t_stat = t_auth = 0.0
+
     print(f"\n{'=' * 60}")
     print(f"  {attack_name.upper()} ATTACK  [{language.upper()}] (MODE: {mode.upper()})")
     print(f"  device={device}  batch={batch_size}  layer={attack_layer}  seed={base_seed}")
@@ -759,6 +780,7 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     print(f"Test set: {len(codes)} samples ({n_human} human / {n_machine} machine)")
 
     # ---- 2. Apply attack transformation -----------------------------------
+    t0 = time.perf_counter()
     attacked = []
     n_mod = 0
     for idx, (code, label) in enumerate(tqdm(zip(codes, labels), desc="Attacking",
@@ -777,6 +799,7 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     
     target_count = len(codes) if attack_all_samples else sum(labels)
     print(f"  Modified {n_mod}/{target_count} samples ({'all' if attack_all_samples else 'machine-only'}) (total test size: {len(codes)})")
+    t_attack = time.perf_counter() - t0
 
     # ---- 3. Feature Assembly (Isolated vs Full) ---------------------------
     # Paper Sec 4.7: In basic mode with single-layer attack, only the target feature group
@@ -800,6 +823,7 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
                     print(f"  Loaded clean baseline features from {clean_file}")
 
     # 3a. Semantic embeddings (CodeT5+)
+    t0 = time.perf_counter()
     if is_isolated and attack_layer != "sem":
         if clean_sem is None:
             print("\nPhase 1/3: CodeT5+ semantic embeddings (clean baseline cache) …")
@@ -824,8 +848,10 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
         del sem; gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    t_sem = time.perf_counter() - t0
 
     # 3b. Statistical metrics (CodeBERT)
+    t0 = time.perf_counter()
     if is_isolated and attack_layer != "stat":
         if clean_stat is None:
             print("Phase 2/3: CodeBERT statistical metrics (clean baseline cache) …")
@@ -850,8 +876,10 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
         del stat; gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    t_stat = time.perf_counter() - t0
 
     # 3c. Authorship features (AST)
+    t0 = time.perf_counter()
     if is_isolated and attack_layer != "auth":
         if clean_auth is None:
             print("Phase 3/3: AST authorship features (clean baseline cache) …")
@@ -871,6 +899,7 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
         if n_fail:
             print(f"  ⚠ AST parsing returned zeros for {n_fail} non-empty samples")
         auth_feature = np.array(all_auth)
+    t_auth = time.perf_counter() - t0
 
     # ---- 4. Assemble feature matrix [sem_768 | stat_7 | auth_38] = 813 ----
     X = np.hstack((sem_feature, stat_feature, auth_feature))
@@ -898,9 +927,17 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 
+    rss_before_inf = current_rss_mb()
+    t_inf_start = time.perf_counter()
     with torch.no_grad():
         probs = model(torch.FloatTensor(X_scaled).to(device)).cpu().numpy().flatten()
         preds = (probs >= 0.5).astype(int)
+    inf_duration = time.perf_counter() - t_inf_start
+    peak_ram_mb = max(rss_start, rss_before_inf, current_rss_mb())
+    n_samples = len(labels)
+    latency_ms = (inf_duration / n_samples) * 1000.0 if n_samples else 0.0
+    throughput = n_samples / max(1e-6, inf_duration)
+    total_time = time.perf_counter() - t_total_start
 
     # ---- 6. Metrics -------------------------------------------------------
     acc  = accuracy_score(labels, preds)
@@ -924,6 +961,8 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     print(f"  Probability distribution (diagnostic):")
     print(f"    Human   → mean={probs[hm].mean():.4f}  std={probs[hm].std():.4f}  predicted-machine={float((probs[hm] >= 0.5).mean()):.4f}")
     print(f"    Machine → mean={probs[mm].mean():.4f}  std={probs[mm].std():.4f}  predicted-machine={float((probs[mm] >= 0.5).mean()):.4f}")
+    print(f"  Cost    -> Latency: {latency_ms:.2f} ms/sample | Throughput: {throughput:.2f} samples/sec | PeakRAM: {peak_ram_mb:.2f} MB")
+    print(f"  Timing  -> Attack: {t_attack:.1f}s | CodeT5+: {t_sem:.1f}s | CodeBERT: {t_stat:.1f}s | AST: {t_auth:.1f}s | Inference: {inf_duration:.2f}s | Total: {total_time:.1f}s")
     print(f"{'=' * 60}\n")
 
     return {
@@ -931,5 +970,7 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
         "precision": prec, "recall": rec, "fpr": fpr,
         "tn": tn, "fp": fp, "fn": fn, "tp": tp,
         "probs": probs, "preds": preds, "labels": labels,
-        "features": (sem_feature, stat_feature, auth_feature)
+        "features": (sem_feature, stat_feature, auth_feature),
+        "Latency_ms": latency_ms, "Throughput": throughput,
+        "PeakRAM_MB": peak_ram_mb,
     }

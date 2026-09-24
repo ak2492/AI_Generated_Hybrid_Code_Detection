@@ -10,6 +10,7 @@ transformers.logging.set_verbosity_error()
 
 import argparse
 import random
+import time
 import numpy as np
 import torch
 import joblib
@@ -30,7 +31,7 @@ from attack_utils import (
     meaning_preserving_rename, meaning_preserving_rename_enhanced,
     meaning_preserving_rename_enhanced_shuffled, SHUFFLE_SALT,
     apply_statistical_attack, apply_statistical_attack_basic,
-    apply_statistical_attack_enhanced_identical,
+    apply_statistical_attack_enhanced_identical, current_rss_mb,
     MAX_CODE_SIZE, MAX_CODE_SIZE_TRANSFORMER
 )
 
@@ -164,10 +165,18 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
         else:
             X_sc = scaler.transform(X_matrix)
 
+        # I time inference like the CPG cost helper for identical cost keys.
+        rss_before = current_rss_mb()
+        t_start = time.perf_counter()
         with torch.no_grad():
             tensor_X = torch.FloatTensor(X_sc).to(device)
             probs = model(tensor_X).cpu().numpy().flatten()
             preds = (probs >= 0.5).astype(int)
+        inf_duration = time.perf_counter() - t_start
+        peak_ram_mb = max(rss_before, current_rss_mb())
+        n_samples = len(labels)
+        latency_ms = (inf_duration / n_samples) * 1000.0 if n_samples else 0.0
+        throughput = n_samples / max(1e-6, inf_duration)
 
         acc = accuracy_score(labels, preds)
         f1 = f1_score(labels, preds, zero_division=0)
@@ -181,8 +190,10 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
         print(f"Accuracy:  {acc:.4f} | F1-Score: {f1:.4f} | ROC-AUC: {roc:.4f}")
         print(f"Precision: {prec:.4f} | Recall:   {rec:.4f} | FPR:     {fpr:.4f}")
         print(f"Confusion Matrix -> TN: {tn} | FP: {fp} | FN: {fn} | TP: {tp}")
+        print(f"  Cost    -> Latency: {latency_ms:.2f} ms/sample | Throughput: {throughput:.2f} samples/sec | PeakRAM: {peak_ram_mb:.2f} MB")
 
-        return {"Scenario": scenario_name, "Accuracy": acc, "AUC": roc, "Precision": prec, "Recall": rec, "F1-Score": f1, "FPR": fpr}
+        return {"Scenario": scenario_name, "Accuracy": acc, "AUC": roc, "Precision": prec, "Recall": rec, "F1-Score": f1, "FPR": fpr,
+                "Latency_ms": latency_ms, "Throughput": throughput, "PeakRAM_MB": peak_ram_mb}
 
     attack_all = (target == "all")
     results = []
@@ -269,10 +280,10 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
     print(f"\n========================================================================================")
     print(f"TABLE 9 REPRODUCTION RESULTS: [{language.upper()}] (MODE: BASIC, TARGET: {target.upper()})")
     print(f"========================================================================================")
-    print(f"{'Scenario':<22} {'Accuracy':<10} {'AUC':<10} {'Precision':<11} {'Recall':<10} {'F1-Score':<10} {'FPR':<10}")
-    print(f"{'-' * 88}")
+    print(f"{'Scenario':<22} {'Accuracy':<10} {'AUC':<10} {'Precision':<11} {'Recall':<10} {'F1-Score':<10} {'FPR':<10} {'Latency':<10} {'Thruput':<10} {'PeakRAM':<10}")
+    print(f"{'-' * 118}")
     for r in results:
-        print(f"{r['Scenario']:<22} {r['Accuracy']:<10.4f} {r['AUC']:<10.4f} {r['Precision']:<11.4f} {r['Recall']:<10.4f} {r['F1-Score']:<10.4f} {r['FPR']:<10.4f}")
+        print(f"{r['Scenario']:<22} {r['Accuracy']:<10.4f} {r['AUC']:<10.4f} {r['Precision']:<11.4f} {r['Recall']:<10.4f} {r['F1-Score']:<10.4f} {r['FPR']:<10.4f} {r.get('Latency_ms', 0.0):<10.2f} {r.get('Throughput', 0.0):<10.2f} {r.get('PeakRAM_MB', 0.0):<10.2f}")
     print(f"========================================================================================\n")
 
 
@@ -335,10 +346,17 @@ def evaluate_attack(language, attack_type, mode, limit, batch_size, base_seed, s
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 
+    rss_before = current_rss_mb()
+    t_start = time.perf_counter()
     with torch.no_grad():
         tensor_X = torch.FloatTensor(X_scaled).to(device)
         probs = model(tensor_X).cpu().numpy().flatten()
         preds = (probs >= 0.5).astype(int)
+    inf_duration = time.perf_counter() - t_start
+    peak_ram_mb = max(rss_before, current_rss_mb())
+    n_samples = len(labels)
+    latency_ms = (inf_duration / n_samples) * 1000.0 if n_samples else 0.0
+    throughput = n_samples / max(1e-6, inf_duration)
 
     acc = accuracy_score(labels, preds)
     f1 = f1_score(labels, preds, zero_division=0)
@@ -352,6 +370,7 @@ def evaluate_attack(language, attack_type, mode, limit, batch_size, base_seed, s
     print(f"Accuracy:  {acc:.4f} | F1-Score: {f1:.4f} | ROC-AUC: {roc:.4f}")
     print(f"Precision: {prec:.4f} | Recall:   {rec:.4f} | FPR:     {fpr:.4f}")
     print(f"Confusion Matrix -> TN: {tn} | FP: {fp} | FN: {fn} | TP: {tp}")
+    print(f"  Cost    -> Latency: {latency_ms:.2f} ms/sample | Throughput: {throughput:.2f} samples/sec | PeakRAM: {peak_ram_mb:.2f} MB")
 
 
 if __name__ == "__main__":
