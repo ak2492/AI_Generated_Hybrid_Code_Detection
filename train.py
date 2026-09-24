@@ -99,6 +99,14 @@ def train_model(language="python", epochs=100, batch_size=64, learning_rate=1e-5
             model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
             torch.save(model.state_dict(), model_file)
 
+    if best_val_f1 == 0.0:
+        # I always leave a usable checkpoint behind because trial runs can
+        # sit at F1 0.0 every epoch; without this the 5-seed runner crashes
+        # on the missing file. Last-epoch weights are the honest fallback.
+        model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
+        torch.save(model.state_dict(), model_file)
+        print("[!] best val F1 stayed 0.0 - saved last-epoch weights as fallback.")
+
     total_time = time.perf_counter() - t0
     peak_vram = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
     peak_ram_mb = max(peak_ram_mb, current_rss_mb())
