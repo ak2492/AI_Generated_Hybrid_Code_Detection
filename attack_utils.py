@@ -883,12 +883,18 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
         X_scaled = scaler.fit_transform(X)
     else:
         scaler_file = f"{language}_adv_scaler.pkl" if adversarial else f"{language}_scaler.pkl"
+        if not os.path.exists(scaler_file):
+            raise FileNotFoundError(
+                f"Missing {scaler_file} in working directory. Run main.py/train.py first in the same folder.")
         scaler = joblib.load(scaler_file)
         X_scaled = scaler.transform(X)
 
     # ---- 5. Inference -----------------------------------------------------
     model = HybridCodeDetector().to(device)
     model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
+    if not os.path.exists(model_file):
+        raise FileNotFoundError(
+            f"Missing {model_file} in working directory. Run main.py/train.py first in the same folder.")
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 

@@ -145,9 +145,15 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
 
     # Model and Scaler setup
     scaler_file = f"{language}_adv_scaler.pkl" if adversarial else f"{language}_scaler.pkl"
+    if not os.path.exists(scaler_file):
+        raise FileNotFoundError(
+            f"Missing {scaler_file} in working directory. Run main.py/train.py first in the same folder.")
     scaler = joblib.load(scaler_file)
     model = HybridCodeDetector().to(device)
     model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
+    if not os.path.exists(model_file):
+        raise FileNotFoundError(
+            f"Missing {model_file} in working directory. Run main.py/train.py first in the same folder.")
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 
@@ -281,20 +287,27 @@ def evaluate_attack(language, attack_type, mode, limit, batch_size, base_seed, s
     if not codes:
         return
 
-    set_seed(base_seed + abs(hash(attack_type)) % 10000)
-    
+    # I use a fixed per-type offset here because Python's hash() is salted per
+    # process (PYTHONHASHSEED) and I want identical repeats on Kaggle.
+    _attack_offsets = {"clean": 0, "auth": 101, "stat": 202, "sem": 303, "full": 404}
+    set_seed(base_seed + _attack_offsets.get(attack_type, 0))
+
     if attack_type == "clean":
         attacked_codes = codes
     else:
         attacked_codes = get_attacked_corpus(codes, labels, attack_type, language, mode, base_seed=base_seed, target=target)
 
+    # I truncate here like the basic path because I do not want long snippets
+    # to OOM the Kaggle run.
     all_sem = []
     for i in tqdm(range(0, len(attacked_codes), batch_size), desc="Extracting CodeT5+ Embeddings", unit="batch", leave=True):
-        all_sem.append(sem_extractor.extract_batch(attacked_codes[i:i + batch_size]))
+        all_sem.append(sem_extractor.extract_batch(
+            [c[:MAX_CODE_SIZE_TRANSFORMER] for c in attacked_codes[i:i + batch_size]]))
 
     all_stat = []
     for i in tqdm(range(0, len(attacked_codes), batch_size), desc="Extracting CodeBERT Metrics", unit="batch", leave=True):
-        all_stat.append(stat_extractor.extract_batch(attacked_codes[i:i + batch_size]))
+        all_stat.append(stat_extractor.extract_batch(
+            [c[:MAX_CODE_SIZE_TRANSFORMER] for c in attacked_codes[i:i + batch_size]]))
 
     auth_parser = get_auth_parser(language)
 
@@ -308,11 +321,17 @@ def evaluate_attack(language, attack_type, mode, limit, batch_size, base_seed, s
         X_scaled = scaler.fit_transform(X_test)
     else:
         scaler_file = f"{language}_adv_scaler.pkl" if adversarial else f"{language}_scaler.pkl"
+        if not os.path.exists(scaler_file):
+            raise FileNotFoundError(
+                f"Missing {scaler_file} in working directory. Run main.py/train.py first in the same folder.")
         scaler = joblib.load(scaler_file)
         X_scaled = scaler.transform(X_test)
 
     model = HybridCodeDetector().to(device)
     model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
+    if not os.path.exists(model_file):
+        raise FileNotFoundError(
+            f"Missing {model_file} in working directory. Run main.py/train.py first in the same folder.")
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 
