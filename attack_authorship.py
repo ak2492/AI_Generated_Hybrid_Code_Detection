@@ -1,7 +1,8 @@
 """
 Authorship Attack Evaluation (Paper Sec 4.7)
 
-Basic mode  : Paper faithful — remove all AST comments from ALL test samples.
+Basic mode  : Paper-identical (most difficult) — AST comments + Python docstrings,
+              machine-only by default (--target machine per paper).
 Enhanced    : Remove comments + normalize naming + normalize layout (machine only).
 
 Usage:
@@ -36,19 +37,22 @@ def main():
 
     if args.mode == "basic":
         def apply_attack(code, idx):
-            mod, _ = strip_comments(code, ts_parser)
+            mod, _ = strip_comments(code, ts_parser, args.language)
             return mod
         name = "authorship-basic"
         attack_all = (args.target == "all")
         attack_layer = "auth"
     else:
         def apply_attack(code, idx):
-            mod, _ = strip_comments_enhanced(code, ts_parser, args.language)
+            # Identical enhanced-auth in both folders: comments+docstrings +
+            # snake normalization, layout untouched. I skip layout here
+            # because I think it would collapse CPG indent macros
+            # symmetrically and erase the 20% relative gap I want.
+            mod, _ = strip_comments(code, ts_parser, args.language)
             mod, _ = normalize_naming_style(mod, ts_parser, args.language, config)
-            mod = normalize_layout(mod, args.language)
             return mod
         name = "authorship-enhanced"
-        attack_all = False
+        attack_all = (args.target == "all")
         attack_layer = "full"
 
     run_attack_evaluation(

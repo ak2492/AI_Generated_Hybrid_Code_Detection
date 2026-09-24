@@ -1,7 +1,8 @@
 """
 Statistical Attack Evaluation (Paper Sec 4.7)
 
-Basic mode  : Paper faithful — mild whitespace disruption on ALL test samples.
+Basic mode  : Paper-identical (most difficult) — trailing 1-4 on 100%, blank 15%,
+              uneven indent (per-file style for Python, 0-8 for Java/C++), machine-only.
 Enhanced    : Aggressive obfuscation (machine-generated samples only).
 
 Usage:
@@ -13,6 +14,7 @@ import argparse
 import random
 from attack_utils import (
     set_seed, apply_statistical_attack, apply_statistical_attack_basic,
+    apply_statistical_attack_enhanced_identical,
     run_attack_evaluation,
 )
 
@@ -39,10 +41,14 @@ def main():
         attack_layer = "stat"
     else:
         def apply_attack(code, idx):
+            # Identical enhanced-stat both folders, stronger than basic.
+            # I use 1-6/25%/0-10 here because I want a visibly stronger yet
+            # still parsing attack; same seed+idx gives same sample both sides.
             rng = random.Random(args.base_seed + idx)
-            return apply_statistical_attack(code, rng)
+            return apply_statistical_attack_enhanced_identical(
+                code, rng, language=args.language)
         name = "statistical-enhanced"
-        attack_all = False
+        attack_all = (args.target == "all")
         attack_layer = "full"
 
     run_attack_evaluation(

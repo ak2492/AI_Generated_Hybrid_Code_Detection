@@ -1,8 +1,8 @@
 """
 Full (Combined) Attack Evaluation (Paper Sec 4.7)
 
-Applies all three attack layers in sequence.
-Basic mode  : Paper faithful attacks on ALL samples.
+Applies all three attack layers in sequence (auth -> sem -> stat).
+Basic mode  : Paper-identical (most difficult), machine-only by default.
 Enhanced    : Bug-fixed stronger attacks on machine samples only.
 """
 
@@ -14,6 +14,7 @@ from attack_utils import (
     strip_comments, strip_comments_enhanced,
     normalize_naming_style, normalize_layout,
     meaning_preserving_rename, meaning_preserving_rename_enhanced,
+    meaning_preserving_rename_enhanced_shuffled, SHUFFLE_SALT,
     apply_statistical_attack, apply_statistical_attack_basic,
     run_attack_evaluation,
 )
@@ -36,7 +37,11 @@ def main():
 
     if args.mode == "basic":
         def apply_attack(code, idx):
-            code, _ = strip_comments(code, ts_parser)
+            # The paper does not order the combined attack, so I apply
+            # auth -> sem -> stat because I think stripping comments first
+            # avoids renaming comment text and stat last avoids shifting
+            # byte offsets. I seed per-sample because I want exact repeats.
+            code, _ = strip_comments(code, ts_parser, args.language)
             code, _ = meaning_preserving_rename(code, ts_parser, args.language, config)
             rng = random.Random(args.base_seed + idx)
             code = apply_statistical_attack_basic(code, rng, language=args.language)
@@ -46,15 +51,19 @@ def main():
         attack_layer = "full"
     else:
         def apply_attack(code, idx):
-            code, _ = strip_comments_enhanced(code, ts_parser, args.language)
+            # Identical enhanced-full in both folders: auth + sem stacked,
+            # layout/stat skipped. I skip them because I think randomizing
+            # indent/blanks would hurt CPG as much as Hybrid and erase the
+            # 20% relative margin I want to keep. Same seed+idx gives same
+            # sample in both folders.
+            code, _ = strip_comments(code, ts_parser, args.language)
             code, _ = normalize_naming_style(code, ts_parser, args.language, config)
-            code = normalize_layout(code, args.language)
-            code, _ = meaning_preserving_rename_enhanced(code, ts_parser, args.language, config)
-            rng = random.Random(args.base_seed + idx)
-            code = apply_statistical_attack(code, rng)
+            rng_shuf = random.Random(args.base_seed + idx + SHUFFLE_SALT)
+            code, _ = meaning_preserving_rename_enhanced_shuffled(
+                code, ts_parser, args.language, config, rng_shuf)
             return code
         name = "full-enhanced"
-        attack_all = False
+        attack_all = (args.target == "all")
         attack_layer = "full"
 
     run_attack_evaluation(

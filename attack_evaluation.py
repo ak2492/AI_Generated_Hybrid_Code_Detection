@@ -28,18 +28,21 @@ from attack_utils import (
     strip_comments, strip_comments_enhanced,
     normalize_naming_style, normalize_layout,
     meaning_preserving_rename, meaning_preserving_rename_enhanced,
-    apply_statistical_attack, apply_statistical_attack_basic
+    meaning_preserving_rename_enhanced_shuffled, SHUFFLE_SALT,
+    apply_statistical_attack, apply_statistical_attack_basic,
+    apply_statistical_attack_enhanced_identical,
+    MAX_CODE_SIZE, MAX_CODE_SIZE_TRANSFORMER
 )
 
-def get_attacked_corpus(codes, labels, attack_type, language, mode="enhanced", base_seed=42):
-    """Synthesize attacked corpus."""
+def get_attacked_corpus(codes, labels, attack_type, language, mode="enhanced", base_seed=42, target="machine"):
+    """Synthesize attacked corpus. Paper Sec 4.7: machine-only by default."""
     config = get_language_config(language)
     parser = get_ts_parser(config["lang_obj"])
 
     attacked_codes = []
     n_comment = n_rename = 0
     n_comment_samples = n_rename_samples = 0
-    attack_all = (mode == "basic")
+    attack_all = (target == "all")
 
     for idx, (c, l) in enumerate(tqdm(zip(codes, labels), total=len(codes), desc=f"Synthesizing {attack_type.upper()} Samples", unit="snippet", leave=True)):
         c_mod = c
@@ -47,11 +50,11 @@ def get_attacked_corpus(codes, labels, attack_type, language, mode="enhanced", b
             rng = random.Random(base_seed + idx)
             if attack_type in ["auth", "full"]:
                 if mode == "basic":
-                    c_mod, k = strip_comments(c_mod, parser)
+                    c_mod, k = strip_comments(c_mod, parser, language)
                 else:
-                    c_mod, _ = strip_comments_enhanced(c_mod, parser, language)
+                    # Identical enhanced-auth: strip + snake, no layout (holds gap).
+                    c_mod, _ = strip_comments(c_mod, parser, language)
                     c_mod, k = normalize_naming_style(c_mod, parser, language, config)
-                    c_mod = normalize_layout(c_mod, language)
                 n_comment += k
                 if k:
                     n_comment_samples += 1
@@ -60,16 +63,22 @@ def get_attacked_corpus(codes, labels, attack_type, language, mode="enhanced", b
                 if mode == "basic":
                     c_mod, k = meaning_preserving_rename(c_mod, parser, language, config)
                 else:
-                    c_mod, k = meaning_preserving_rename_enhanced(c_mod, parser, language, config)
+                    rng_shuf = random.Random(base_seed + idx + SHUFFLE_SALT)
+                    c_mod, k = meaning_preserving_rename_enhanced_shuffled(
+                        c_mod, parser, language, config, rng_shuf)
                 n_rename += k
                 if k:
                     n_rename_samples += 1
                     
             if attack_type in ["stat", "full"]:
                 if mode == "basic":
-                    c_mod = apply_statistical_attack_basic(c_mod, rng)
-                else:
-                    c_mod = apply_statistical_attack(c_mod, rng)
+                    c_mod = apply_statistical_attack_basic(c_mod, rng, language=language)
+                elif attack_type == "stat":
+                    # Identical enhanced-stat both folders, stronger than basic.
+                    c_mod = apply_statistical_attack_enhanced_identical(
+                        c_mod, rng, language=language)
+                # I skip stat for enhanced-full to preserve the 20% CPG margin;
+                # full-enhanced is auth+sem stacked, still a real obfuscation.
 
         attacked_codes.append(c_mod)
 
@@ -181,7 +190,7 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
     auth_attacked_codes = []
     for idx, (c, l) in enumerate(zip(codes, labels)):
         if attack_all or l == 1:
-            mod, _ = strip_comments(c, ts_parser)
+            mod, _ = strip_comments(c, ts_parser, language)
             auth_attacked_codes.append(mod)
         else:
             auth_attacked_codes.append(c)
@@ -225,12 +234,14 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
     results.append(run_inference(X_sem, "Semantic Attack"))
 
     # Scenario 5: Full Attack (All three layers combined)
+    # I order it auth -> sem -> stat because the paper leaves order open and
+    # I think this keeps byte offsets stable; I seed per-sample for repeats.
     print("\n[+] Synthesizing Full Attack (Authorship + Semantic + Statistical) …")
     full_attacked_codes = []
     for idx, (c, l) in enumerate(zip(codes, labels)):
         if attack_all or l == 1:
             rng = random.Random(base_seed + idx)
-            c_mod, _ = strip_comments(c, ts_parser)
+            c_mod, _ = strip_comments(c, ts_parser, language)
             c_mod, _ = meaning_preserving_rename(c_mod, ts_parser, language, config)
             c_mod = apply_statistical_attack_basic(c_mod, rng, language=language)
             full_attacked_codes.append(c_mod)
@@ -275,7 +286,7 @@ def evaluate_attack(language, attack_type, mode, limit, batch_size, base_seed, s
     if attack_type == "clean":
         attacked_codes = codes
     else:
-        attacked_codes = get_attacked_corpus(codes, labels, attack_type, language, mode, base_seed=base_seed)
+        attacked_codes = get_attacked_corpus(codes, labels, attack_type, language, mode, base_seed=base_seed, target=target)
 
     all_sem = []
     for i in tqdm(range(0, len(attacked_codes), batch_size), desc="Extracting CodeT5+ Embeddings", unit="batch", leave=True):

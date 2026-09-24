@@ -1,7 +1,8 @@
 """
 Semantic Attack Evaluation (Paper Sec 4.7)
 
-Basic mode  : Paper faithful — rename variables to v_1..v_n on ALL test samples.
+Basic mode  : Paper-identical (most difficult) — radical declared-var rename v_1..v_n,
+              expanded parents + builtins/dunder protection + attribute skip, machine-only.
 Enhanced    : Bug-fixed rename + string normalization (machine-generated only).
 
 Usage:
@@ -10,10 +11,12 @@ Usage:
 """
 
 import argparse
+import random
 from tree_sitter import Parser
 from attack_utils import (
     set_seed, get_language_config, get_ts_parser,
     meaning_preserving_rename, meaning_preserving_rename_enhanced,
+    meaning_preserving_rename_enhanced_shuffled, SHUFFLE_SALT,
     run_attack_evaluation,
 )
 
@@ -42,10 +45,15 @@ def main():
         attack_layer = "sem"
     else:
         def apply_attack(code, idx):
-            mod, _ = meaning_preserving_rename_enhanced(code, ts_parser, args.language, config)
+            # I use the shuffled enhanced variant here because I think a fixed
+            # serial order is too learnable; same seed+idx gives same sample
+            # in both folders.
+            rng_shuf = random.Random(args.base_seed + idx + SHUFFLE_SALT)
+            mod, _ = meaning_preserving_rename_enhanced_shuffled(
+                code, ts_parser, args.language, config, rng_shuf)
             return mod
         name = "semantic-enhanced"
-        attack_all = False
+        attack_all = (args.target == "all")
         attack_layer = "full"
 
     run_attack_evaluation(

@@ -55,19 +55,32 @@ sys.setrecursionlimit(10_000)
 # ---------------------------------------------------------------------------
 MAX_CODE_SIZE = 100_000          # skip code snippets larger than this (chars)
 MAX_CODE_SIZE_TRANSFORMER = 50_000  # truncate before feeding to transformers
+# I offset the shuffle RNG from the stat RNG because I want the same sample
+# to get the same permutation in both folders while keeping stat independent.
+SHUFFLE_SALT = 7919
 
 # ---------------------------------------------------------------------------
-# Variable-declaration parent types (mirrored from authorship_*.py)
+# Variable-declaration parent types for the Paper Sec 4.7 Semantic Layer.
+# The paper only says "variables" so I chose the widest set I still consider
+# safe: declared variables + params + loop/with/except bindings + func/class
+# names. I protect keywords, builtins and dunders and I never touch attribute
+# tails because I want the rename to stay meaning-preserving.
 # ---------------------------------------------------------------------------
 VAR_PARENTS = {
     "python": {"assignment", "ann_assign", "parameters", "for_statement",
                "for_in_clause", "with_statement", "except_clause",
-               "pattern_list", "named_expression", "as_pattern"},
+               "pattern_list", "named_expression", "as_pattern",
+               "typed_parameter", "default_parameter", "function_definition",
+               "class_definition", "global_statement", "nonlocal_statement"},
     "java":   {"variable_declarator", "formal_parameter",
                "catch_formal_parameter", "spread_parameter",
-               "field_declaration", "enhanced_for_statement", "resource"},
+               "field_declaration", "enhanced_for_statement", "resource",
+               "method_declaration", "class_declaration",
+               "constructor_declaration"},
     "cpp":    {"init_declarator", "parameter_declaration", "declaration",
-               "for_range_loop", "condition_clause", "declarator"},
+               "for_range_loop", "condition_clause", "declarator",
+               "function_declarator", "function_definition",
+               "class_specifier", "struct_specifier"},
 }
 
 # =========================================================================
@@ -178,10 +191,15 @@ def _iter_nodes(root):
 #  Attack transformations
 # =========================================================================
 
-def strip_comments(code_str, parser):
-    """Paper Sec 4.7 — Authorship Layer baseline: remove all AST comments.
+def strip_comments(code_str, parser, language=None):
+    """Paper Sec 4.7 — Authorship Layer: remove all comments.
 
-    Uses iterative traversal so it never freezes on deep trees.
+    The paper does not say whether Python docstrings count as comments, so
+    I remove them as well (standalone expression_statement > string) because
+    I think they carry the same natural-language signature and leaving them
+    would understate the attack. I keep layout and naming untouched here
+    because I think each paper layer should stay isolated. I traverse
+    iteratively because I do not want deep trees to freeze the run.
     Returns (modified_code, n_comments_removed).
     """
     try:
@@ -190,16 +208,32 @@ def strip_comments(code_str, parser):
         code_bytes_raw = bytes(code_str, "utf8")
         tree = parser.parse(code_bytes_raw)
 
-        comment_nodes = [n for n in _iter_nodes(tree.root_node)
-                         if "comment" in n.type]
-        if not comment_nodes:
+        remove_nodes = [n for n in _iter_nodes(tree.root_node)
+                        if "comment" in n.type]
+        # I include docstrings here because I think they carry the same signature.
+        if language == "python":
+            for node in _iter_nodes(tree.root_node):
+                if (node.type == "string"
+                        and node.parent is not None
+                        and node.parent.type == "expression_statement"):
+                    remove_nodes.append(node.parent)
+
+        # De-duplicate overlapping ranges (docstring parent vs inner string).
+        seen = set()
+        unique = []
+        for node in remove_nodes:
+            key = (node.start_byte, node.end_byte)
+            if key not in seen:
+                seen.add(key)
+                unique.append(node)
+        if not unique:
             return code_str, 0
 
-        comment_nodes.sort(key=lambda n: n.start_byte, reverse=True)
+        unique.sort(key=lambda n: n.start_byte, reverse=True)
         code_bytes = bytearray(code_bytes_raw)
-        for node in comment_nodes:
+        for node in unique:
             del code_bytes[node.start_byte:node.end_byte]
-        return code_bytes.decode("utf8", errors="ignore"), len(comment_nodes)
+        return code_bytes.decode("utf8", errors="ignore"), len(unique)
     except Exception:
         return code_str, 0
 
@@ -335,10 +369,15 @@ ENHANCED_VAR_PARENTS = {
 
 
 def meaning_preserving_rename(code_str, parser, language, config):
-    """Paper Sec 4.7 — Semantic Layer: rename variables to v_1 … v_n.
+    """Paper Sec 4.7 — Semantic Layer: radical meaning-preserving rename v_1 … v_n.
 
-    Deterministic (sorted names → sequential v_i) for reproducibility.
-    Uses iterative traversal. Builtins and keywords are protected.
+    The paper does not define which names count as "variables", so I rename
+    the widest set I still trust (expanded VAR_PARENTS + all LANG_ID_TYPES)
+    with deterministic sorted -> v_i mapping because I want the strongest
+    reproducible attack. I protect keywords, builtins and dunders and I skip
+    attribute tails because I want execution to stay intact. I leave string
+    and print rewriting to enhanced mode because I think it falls outside
+    the paper layer.
     Returns (new_code, n_distinct_names).
     """
     try:
@@ -348,11 +387,12 @@ def meaning_preserving_rename(code_str, parser, language, config):
         tree = parser.parse(code_bytes_raw)
         allowed = VAR_PARENTS[language]
         builtins = LANG_BUILTINS.get(language, set())
+        id_types = LANG_ID_TYPES.get(language, {"identifier"})
 
         # 1. collect unique declared-variable names
         target_names = set()
         for node in _iter_nodes(tree.root_node):
-            if node.type == "identifier":
+            if node.type in id_types:
                 pt = node.parent.type if node.parent else ""
                 if pt in allowed:
                     name = code_bytes_raw[node.start_byte:node.end_byte] \
@@ -366,7 +406,7 @@ def meaning_preserving_rename(code_str, parser, language, config):
 
         # 2. replace matching identifier occurrences (reverse order)
         all_ids = [n for n in _iter_nodes(tree.root_node)
-                   if n.type == "identifier"]
+                   if n.type in id_types]
         all_ids.sort(key=lambda n: n.start_byte, reverse=True)
 
         code_bytes = bytearray(code_bytes_raw)
@@ -448,11 +488,90 @@ def meaning_preserving_rename_enhanced(code_str, parser, language, config):
     except Exception: return code_str, 0
 
 
+def meaning_preserving_rename_enhanced_shuffled(code_str, parser, language, config, rng=None):
+    """Enhanced semantic with randomized naming (v7,v3,v1...), same scope as enhanced.
+
+    I shuffle the v_i assignment with a seeded RNG because I think a fixed
+    serial order lets a model latch onto position, while a shuffled yet
+    bijective map stays equally valid code. I keep func/class names in scope
+    where safely changeable (user-defined defs) and I protect keywords,
+    builtins and dunders. I rename consistently everywhere (no attribute-tail
+    skip, like enhanced) because I think splitting def and use would break
+    call edges and look like noise rather than a real obfuscation attack.
+    Returns (new_code, n_transforms).
+    """
+    try:
+        if not code_str or len(code_str) > MAX_CODE_SIZE: return code_str, 0
+        import random as _random
+        code_bytes_raw = bytes(code_str, "utf8")
+        tree = parser.parse(code_bytes_raw)
+        n_transforms = 0
+        id_types = LANG_ID_TYPES[language]
+        builtins = LANG_BUILTINS.get(language, set())
+        allowed = ENHANCED_VAR_PARENTS[language]
+
+        target_names = set()
+        all_id_nodes = [n for n in _iter_nodes(tree.root_node) if n.type in id_types]
+
+        for node in all_id_nodes:
+            pt = node.parent.type if node.parent else ""
+            if pt in allowed:
+                name = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
+                if name and name not in config["reserved"] and name not in builtins and not name.startswith("__"):
+                    target_names.add(name)
+
+        if not target_names: return code_str, 0
+        ordered = sorted(target_names)
+        perm = [f"v_{i+1}" for i in range(len(ordered))]
+        r = rng if rng is not None else _random.Random(42 + SHUFFLE_SALT)
+        r.shuffle(perm)
+        var_map = {n: p for n, p in zip(ordered, perm)}
+
+        all_id_nodes.sort(key=lambda n: n.start_byte, reverse=True)
+        code_bytes = bytearray(code_bytes_raw)
+        for node in all_id_nodes:
+            name = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
+            if name in var_map:
+                code_bytes[node.start_byte:node.end_byte] = bytes(var_map[name], "utf8")
+                n_transforms += 1
+        code_str = code_bytes.decode("utf8", errors="ignore")
+
+        code_bytes_raw = bytes(code_str, "utf8")
+        tree = parser.parse(code_bytes_raw)
+        string_types = {"string", "string_literal", "concatenated_string", "template_string", "raw_string_literal"}
+        string_nodes = [n for n in _iter_nodes(tree.root_node) if n.type in string_types and (not n.parent or n.parent.type != "expression_statement")]
+
+        if string_nodes:
+            string_nodes.sort(key=lambda n: n.start_byte, reverse=True)
+            code_bytes = bytearray(code_bytes_raw)
+            for node in string_nodes:
+                original = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
+                if original.startswith('"""') or original.startswith("'''"): continue
+                elif original.startswith('"'): replacement = '"s"'
+                elif original.startswith("'"): replacement = "'s'"
+                else: continue
+                code_bytes[node.start_byte:node.end_byte] = bytes(replacement, "utf8")
+                n_transforms += 1
+            code_str = code_bytes.decode("utf8", errors="ignore")
+
+        if language == "python": code_str = re.sub(r'print\s*\(([^)]*)\)', 'print("output")', code_str)
+        elif language == "java": code_str = re.sub(r'System\.out\.println\s*\(([^)]*)\)', 'System.out.println("output")', code_str)
+        elif language == "cpp": code_str = re.sub(r'(std::)?cout\s*<<[^;]*;', 'std::cout << "output" << std::endl;', code_str)
+        return code_str, n_transforms
+    except Exception: return code_str, 0
+
+
 def apply_statistical_attack_basic(code_str, rng, language="python"):
     """Paper Sec 4.7 — Statistical Layer: disrupt visual regularities.
 
-    Disrupts layout regularities (indentation style, trailing whitespace, blank lines)
-    while strictly preserving valid code syntax and functional logic.
+    The paper names the three operations but gives no rates, so I chose what
+    I consider the hardest form that still runs: trailing 1-4 spaces on every
+    non-empty line, blank injection at 15%, Python per-file indent-style
+    switch applied to the true indent level (I avoid per-line randomization
+    in Python because I think breaking blocks would invalidate the test),
+    Java/C++ per-line uneven indent 0-8 spaces where I think braces keep it
+    safe. I require the caller to pass a seeded rng (base_seed+idx) because
+    I want the attack to reproduce exactly.
     """
     lines = code_str.split("\n")
     new_lines = []
@@ -476,9 +595,9 @@ def apply_statistical_attack_basic(code_str, rng, language="python"):
                 else:
                     base_indent = "    " * indent_level
 
-                trailing = " " * rng.randint(1, 4) if rng.random() < 0.8 else ""
+                trailing = " " * rng.randint(1, 4)
                 new_lines.append(base_indent + stripped + trailing)
-                if rng.random() < 0.10:
+                if rng.random() < 0.15:
                     new_lines.append("")
             else:
                 if rng.random() < 0.5:
@@ -489,14 +608,62 @@ def apply_statistical_attack_basic(code_str, rng, language="python"):
             stripped = line.strip()
             if stripped:
                 indent = " " * rng.randint(0, 8)
-                trailing = " " * rng.randint(1, 4) if rng.random() < 0.8 else ""
+                trailing = " " * rng.randint(1, 4)
                 new_lines.append(indent + stripped + trailing)
-                if rng.random() < 0.10:
+                if rng.random() < 0.15:
                     new_lines.append("")
             else:
                 if rng.random() < 0.5:
                     new_lines.append("")
 
+    return "\n".join(new_lines)
+
+
+def apply_statistical_attack_enhanced_identical(code_str, rng, language="python"):
+    """Identical enhanced-stat in both folders (stronger than basic, still valid).
+
+    I use trailing 1-6 on every line, blanks at 25%, indent 0-10 for Java/C++
+    and per-file style switch for Python because I want a visibly stronger
+    layout attack than basic (1-4/15%/0-8) that still parses. I keep Python
+    per-file because I think per-line would break blocks and stop testing
+    detection. Same seed+idx gives same output both folders.
+    """
+    lines = code_str.split("\n")
+    new_lines = []
+    if language == "python":
+        indent_style = rng.choice(["two_space", "tab", "three_space", "four_space"])
+        for line in lines:
+            stripped = line.strip()
+            if stripped:
+                leading = len(line) - len(line.lstrip())
+                indent_level = leading // 4
+                if indent_style == "two_space":
+                    base_indent = "  " * indent_level
+                elif indent_style == "tab":
+                    base_indent = "\t" * indent_level
+                elif indent_style == "three_space":
+                    base_indent = "   " * indent_level
+                else:
+                    base_indent = "    " * indent_level
+                trailing = " " * rng.randint(1, 6)
+                new_lines.append(base_indent + stripped + trailing)
+                if rng.random() < 0.25:
+                    new_lines.append("")
+            else:
+                if rng.random() < 0.5:
+                    new_lines.append("")
+    else:
+        for line in lines:
+            stripped = line.strip()
+            if stripped:
+                indent = " " * rng.randint(0, 10)
+                trailing = " " * rng.randint(1, 6)
+                new_lines.append(indent + stripped + trailing)
+                if rng.random() < 0.25:
+                    new_lines.append("")
+            else:
+                if rng.random() < 0.5:
+                    new_lines.append("")
     return "\n".join(new_lines)
 
 
@@ -642,7 +809,9 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
                 batch = [c[:MAX_CODE_SIZE_TRANSFORMER] for c in codes[i:i+batch_size]]
                 all_clean_sem.append(sem.extract_batch(batch))
             clean_sem = np.vstack(all_clean_sem)
-            del sem; gc.collect(); torch.cuda.empty_cache()
+            del sem; gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         sem_feature = clean_sem
     else:
         print("\nPhase 1/3: CodeT5+ semantic embeddings …")
@@ -652,7 +821,9 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
             batch = [c[:MAX_CODE_SIZE_TRANSFORMER] for c in attacked[i:i+batch_size]]
             all_sem.append(sem.extract_batch(batch))
         sem_feature = np.vstack(all_sem)
-        del sem; gc.collect(); torch.cuda.empty_cache()
+        del sem; gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # 3b. Statistical metrics (CodeBERT)
     if is_isolated and attack_layer != "stat":
@@ -664,7 +835,9 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
                 batch = [c[:MAX_CODE_SIZE_TRANSFORMER] for c in codes[i:i+batch_size]]
                 all_clean_stat.append(stat.extract_batch(batch))
             clean_stat = np.vstack(all_clean_stat)
-            del stat; gc.collect(); torch.cuda.empty_cache()
+            del stat; gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         stat_feature = clean_stat
     else:
         print("Phase 2/3: CodeBERT statistical metrics …")
@@ -674,7 +847,9 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
             batch = [c[:MAX_CODE_SIZE_TRANSFORMER] for c in attacked[i:i+batch_size]]
             all_stat.append(stat.extract_batch(batch))
         stat_feature = np.vstack(all_stat)
-        del stat; gc.collect(); torch.cuda.empty_cache()
+        del stat; gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # 3c. Authorship features (AST)
     if is_isolated and attack_layer != "auth":

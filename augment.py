@@ -5,6 +5,7 @@ from attack_utils import (
     strip_comments, strip_comments_enhanced,
     normalize_naming_style, normalize_layout,
     meaning_preserving_rename, meaning_preserving_rename_enhanced,
+    meaning_preserving_rename_enhanced_shuffled, SHUFFLE_SALT,
     apply_statistical_attack, apply_statistical_attack_basic
 )
 
@@ -22,10 +23,10 @@ def generate_adversarial_augmentations(codes, labels, language, base_seed=42):
 
     def apply_full_attack_basic(code_str, idx):
         if not code_str or not isinstance(code_str, str): return ''
-        c, _ = strip_comments(code_str, ts_parser)
+        c, _ = strip_comments(code_str, ts_parser, language)
         c, _ = meaning_preserving_rename(c, ts_parser, language, config)
         rng = random.Random(base_seed + idx)
-        c = apply_statistical_attack_basic(c, rng)
+        c = apply_statistical_attack_basic(c, rng, language=language)
         return c
 
     def apply_full_attack_enhanced(code_str, idx):
@@ -33,7 +34,9 @@ def generate_adversarial_augmentations(codes, labels, language, base_seed=42):
         c, _ = strip_comments_enhanced(code_str, ts_parser, language)
         c, _ = normalize_naming_style(c, ts_parser, language, config)
         c = normalize_layout(c, language)
-        c, _ = meaning_preserving_rename_enhanced(c, ts_parser, language, config)
+        rng_shuf = random.Random(base_seed + idx + SHUFFLE_SALT)
+        c, _ = meaning_preserving_rename_enhanced_shuffled(
+            c, ts_parser, language, config, rng_shuf)
         rng = random.Random(base_seed + idx)
         c = apply_statistical_attack(c, rng)
         return c

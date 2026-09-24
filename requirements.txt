@@ -1,9 +1,11 @@
-torch==2.10.0
+torch
 transformers==4.40.0
 huggingface_hub>=0.23.0
 datasets
 numpy
 scikit-learn
+tqdm
+joblib
 tree-sitter==0.26.0
 tree-sitter-java==0.23.5
 tree-sitter-cpp==0.23.4

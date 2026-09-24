@@ -40,8 +40,9 @@ def run_extraction(language="python", split="train", limit=None, sem_batch=64, s
         all_sem.append(sem_extractor.extract_batch(batch))
     
     del sem_extractor
-    torch.cuda.empty_cache()
     gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     print("Phase 2: Running Statistical Extraction...")
     stat_extractor = StatisticalExtractor(device)
@@ -50,8 +51,9 @@ def run_extraction(language="python", split="train", limit=None, sem_batch=64, s
         all_stat.append(stat_extractor.extract_batch(batch))
         
     del stat_extractor
-    torch.cuda.empty_cache()
     gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     print("Phase 3: Running AST Parsing serially to avoid Kaggle multiprocessing freezes...")
     all_auth_flat = [auth_parser(c) for c in tqdm(codes, desc="AST Parsing", unit="snippet")]
