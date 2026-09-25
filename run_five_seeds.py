@@ -144,7 +144,8 @@ def _attack_suites(language, base_seed, target):
 
 def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None,
                  learning_rate=1e-5, threshold=0.50, base_seed=42, target="machine",
-                 skip_external=False, out_csv=None, resume=False):
+                 skip_external=False, out_csv=None, resume=False,
+                 feature_cache_dir=".", rebuild_cache=False):
     variant = "adv" if adversarial else "clean"
     tag = "ADV" if adversarial else "CLEAN"
     if batch_size is None:
@@ -220,7 +221,9 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
             res = run_attack_evaluation(
                 language, name, fn, batch_size, None, base_seed,
                 attack_all_samples=attack_all, adversarial=adversarial,
-                attack_layer=layer, mode=mode)
+                attack_layer=layer, mode=mode,
+                feature_cache_dir=feature_cache_dir,
+                rebuild_cache=rebuild_cache)
             if res is None:
                 continue
             _row(scenario, {"Acc": res["accuracy"], "Prec": res["precision"],
@@ -243,7 +246,9 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
             _restore()
             ext_results = run_external(language=language, suite="all",
                                        batch_size=batch_size, threshold=threshold,
-                                       base_seed=base_seed, adversarial=adversarial)
+                                       base_seed=base_seed, adversarial=adversarial,
+                                       feature_cache_dir=feature_cache_dir,
+                                       rebuild_cache=rebuild_cache)
             for scenario, res in ext_results.items():
                 _row(scenario, res)
             del ext_results
@@ -296,6 +301,12 @@ if __name__ == "__main__":
                         help="Fixed attack-sampling seed (keep 42 so attacked sets match across training seeds)")
     parser.add_argument("--target", type=str, default="machine", choices=["machine", "all"])
     parser.add_argument("--skip-external", action="store_true")
+    parser.add_argument("--no-feature-cache", action="store_true",
+                        help="Disable the extract-once feature cache (extract every seed)")
+    parser.add_argument("--rebuild-cache", action="store_true",
+                        help="Force re-extraction even when cache files exist")
+    parser.add_argument("--cache-dir", type=str, default=".",
+                        help="Directory for extract-once cache files")
     parser.add_argument("--resume", action="store_true",
                         help="Reuse existing *_seed{s} artifacts and keep other configs' CSV rows")
     parser.add_argument("--upload", action="store_true",
@@ -311,6 +322,9 @@ if __name__ == "__main__":
     langs = LANGUAGES if args.language == "all" else [args.language]
     variant = "adv" if args.adversarial else "clean"
 
+    # I pass None (not ".") when caching is off so library code takes its
+    # original uncached path byte-for-byte.
+    feature_cache_dir = None if args.no_feature_cache else args.cache_dir
     for lang in langs:
         out_csv = f"five_seed_{lang}_{variant}.csv"
         df_all = run_language(lang, seeds, adversarial=args.adversarial,
@@ -319,7 +333,9 @@ if __name__ == "__main__":
                               threshold=args.threshold, base_seed=args.base_seed,
                               target=args.target,
                               skip_external=args.skip_external,
-                              out_csv=out_csv, resume=args.resume)
+                              out_csv=out_csv, resume=args.resume,
+                              feature_cache_dir=feature_cache_dir,
+                              rebuild_cache=args.rebuild_cache)
         summary = summarize(df_all[df_all["Language"] == lang])
         summary.to_csv(f"five_seed_{lang}_{variant}_summary.csv", index=False)
 

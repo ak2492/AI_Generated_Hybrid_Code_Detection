@@ -48,9 +48,13 @@ def _default_batch(language):
     return 64 if language == "python" else (32 if language == "java" else 16)
 
 
-def _evaluate_external(samples, language, sem_extractor, stat_extractor,
-                       batch_size, threshold, adversarial, tag):
-    """Extract Hybrid features for raw {code,label} rows and score one model."""
+def extract_external_features(samples, language, sem_extractor, stat_extractor):
+    """Seed-INDEPENDENT half of external eval: extract the raw (unscaled)
+    813-d feature matrix for raw {code,label} rows.
+
+    External rows are sampled with a fixed seed, so the returned matrix is
+    identical for every training seed and safe to cache on disk.
+    """
     codes = [s["code"] for s in samples]
     labels = np.array([s["label"] for s in samples])
     n_human = int((labels == 0).sum())
@@ -69,6 +73,18 @@ def _evaluate_external(samples, language, sem_extractor, stat_extractor,
     all_auth = np.array([safe_extract_authorship(c, auth_parser)
                          for c in tqdm(codes, desc="AST (external)", leave=True)])
     X = np.hstack((np.vstack(all_sem), np.vstack(all_stat), all_auth))
+    print(f"  External feature matrix assembled: {X.shape}")
+
+    return {"X": X, "labels": labels}
+
+
+def score_external_features(feat, language, batch_size, threshold, adversarial, tag):
+    """Seed-DEPENDENT half of external eval: scale with this seed's scaler,
+    run inference, and report metrics. Prints and return dict are identical
+    to the original end-to-end helper.
+    """
+    X = feat["X"]
+    labels = feat["labels"]
 
     scaler_file = f"{language}_adv_scaler.pkl" if adversarial else f"{language}_scaler.pkl"
     if not os.path.exists(scaler_file):
@@ -130,6 +146,58 @@ def _evaluate_external(samples, language, sem_extractor, stat_extractor,
             "PeakRAM_MB": peak_ram_mb}
 
 
+def _evaluate_external(samples, language, sem_extractor, stat_extractor,
+                       batch_size, threshold, adversarial, tag):
+    """Original end-to-end helper (extract + score); behavior unchanged."""
+    feat = extract_external_features(samples, language, sem_extractor, stat_extractor)
+    return score_external_features(feat, language, batch_size, threshold,
+                                   adversarial, tag)
+
+
+def external_feature_cache_path(language, suite, base_seed=42, cache_dir="."):
+    # External rows are sampled with fixed seeds, so one cache entry per
+    # (language, suite) covers every training seed; base_seed stays in the
+    # key as insurance.
+    return os.path.join(cache_dir, f"{language}_extfeat_{suite}_b{base_seed}.npz")
+
+
+def save_cached_external_features(path, feat):
+    np.savez_compressed(path, X=feat["X"], labels=feat["labels"])
+    print(f"  Cached external features -> {path} (later seeds skip extraction)")
+
+
+def load_cached_external_features(path):
+    try:
+        z = np.load(path, allow_pickle=False)
+    except (OSError, ValueError):
+        return None
+    try:
+        X, labels = z["X"], z["labels"]
+    except KeyError:
+        return None
+    # I validate shapes here because a half-written or foreign .npz must
+    # never silently poison a seed run; any mismatch forces re-extraction.
+    if X.ndim != 2 or X.shape[1] != 813 or X.shape[0] != labels.shape[0]:
+        return None
+    print(f"  Loaded cached external features from {path} (no re-extraction)")
+    return {"X": X, "labels": labels}
+
+
+def _evaluate_external_cached(samples, language, sem_extractor, stat_extractor,
+                              batch_size, threshold, adversarial, tag,
+                              cache_path=None, rebuild_cache=False):
+    if cache_path is not None:
+        feat = None if rebuild_cache else load_cached_external_features(cache_path)
+        if feat is None:
+            feat = extract_external_features(samples, language, sem_extractor,
+                                             stat_extractor)
+            save_cached_external_features(cache_path, feat)
+        return score_external_features(feat, language, batch_size, threshold,
+                                       adversarial, tag)
+    return _evaluate_external(samples, language, sem_extractor, stat_extractor,
+                              batch_size, threshold, adversarial, tag)
+
+
 def _loaders(device):
     return SemanticExtractor(device), StatisticalExtractor(device)
 
@@ -140,7 +208,8 @@ def _model_tag(adversarial):
 
 def run_external_semeval_python(subtask_name, is_multiclass, sem_extractor,
                                 stat_extractor, batch_size=None,
-                                threshold=0.50, adversarial=False):
+                                threshold=0.50, adversarial=False,
+                                cache_path=None, rebuild_cache=False):
     from datasets import load_dataset
     batch_size = batch_size or _default_batch("python")
     print("\n" + "=" * 85)
@@ -166,9 +235,9 @@ def run_external_semeval_python(subtask_name, is_multiclass, sem_extractor,
         return None
     balanced = human_samples[:n_h] + ai_samples[:n_a]
     random.Random(EXT_SEED).shuffle(balanced)
-    res = _evaluate_external(balanced, "python", sem_extractor, stat_extractor,
+    res = _evaluate_external_cached(balanced, "python", sem_extractor, stat_extractor,
                              batch_size, threshold, adversarial,
-                             f"SEMEVAL {subtask_name} PYTHON [{_model_tag(adversarial)}]")
+                             f"SEMEVAL {subtask_name} PYTHON [{_model_tag(adversarial)}]", cache_path, rebuild_cache)
     del raw_ds, filtered_ds, human_samples, ai_samples, balanced
     gc.collect()
     return res
@@ -176,7 +245,8 @@ def run_external_semeval_python(subtask_name, is_multiclass, sem_extractor,
 
 def run_external_semeval_java(subtask_name, is_multiclass, sem_extractor,
                               stat_extractor, batch_size=None,
-                              threshold=0.50, adversarial=False):
+                              threshold=0.50, adversarial=False,
+                              cache_path=None, rebuild_cache=False):
     from datasets import load_dataset
     batch_size = batch_size or _default_batch("java")
     print("\n" + "=" * 85)
@@ -203,9 +273,9 @@ def run_external_semeval_java(subtask_name, is_multiclass, sem_extractor,
     n_a = min(len(ai_samples), MAX_SEMEVAL_PER_CLASS)
     balanced = human_samples[:n_h] + ai_samples[:n_a]
     random.Random(EXT_SEED).shuffle(balanced)
-    res = _evaluate_external(balanced, "java", sem_extractor, stat_extractor,
+    res = _evaluate_external_cached(balanced, "java", sem_extractor, stat_extractor,
                              batch_size, threshold, adversarial,
-                             f"SEMEVAL {subtask_name} JAVA [{_model_tag(adversarial)}]")
+                             f"SEMEVAL {subtask_name} JAVA [{_model_tag(adversarial)}]", cache_path, rebuild_cache)
     del raw_ds, filtered_ds, human_samples, ai_samples, balanced
     gc.collect()
     return res
@@ -213,7 +283,8 @@ def run_external_semeval_java(subtask_name, is_multiclass, sem_extractor,
 
 def run_external_semeval_cpp(subtask_name, is_multiclass, sem_extractor,
                              stat_extractor, batch_size=None,
-                             threshold=0.50, adversarial=False):
+                             threshold=0.50, adversarial=False,
+                             cache_path=None, rebuild_cache=False):
     from datasets import load_dataset
     batch_size = batch_size or _default_batch("cpp")
     print("\n" + "=" * 85)
@@ -244,9 +315,9 @@ def run_external_semeval_cpp(subtask_name, is_multiclass, sem_extractor,
         return None
     balanced = human_samples[:n_h] + ai_samples[:n_a]
     random.Random(EXT_SEED).shuffle(balanced)
-    res = _evaluate_external(balanced, "cpp", sem_extractor, stat_extractor,
+    res = _evaluate_external_cached(balanced, "cpp", sem_extractor, stat_extractor,
                              batch_size, threshold, adversarial,
-                             f"SEMEVAL {subtask_name} C++ [{_model_tag(adversarial)}]")
+                             f"SEMEVAL {subtask_name} C++ [{_model_tag(adversarial)}]", cache_path, rebuild_cache)
     del raw_ds, filtered_ds, human_samples, ai_samples, balanced
     gc.collect()
     return res
@@ -279,7 +350,8 @@ def _read_hmcorp(file_path, language, cap=2000):
 
 
 def evaluate_hmcorp_python(sem_extractor, stat_extractor, batch_size=None,
-                           threshold=0.50, adversarial=False):
+                            threshold=0.50, adversarial=False,
+                            cache_path=None, rebuild_cache=False):
     from huggingface_hub import hf_hub_download
     batch_size = batch_size or _default_batch("python")
     print("\n" + "=" * 85)
@@ -292,13 +364,14 @@ def evaluate_hmcorp_python(sem_extractor, stat_extractor, batch_size=None,
         print(f"[!] Failed to download HMCorp Python dataset: {e}")
         return None
     balanced = _read_hmcorp(file_path, "python")
-    return _evaluate_external(balanced, "python", sem_extractor, stat_extractor,
+    return _evaluate_external_cached(balanced, "python", sem_extractor, stat_extractor,
                               batch_size, threshold, adversarial,
-                              f"HMCorp PYTHON [{_model_tag(adversarial)}]")
+                              f"HMCorp PYTHON [{_model_tag(adversarial)}]", cache_path, rebuild_cache)
 
 
 def evaluate_hmcorp_java(sem_extractor, stat_extractor, batch_size=None,
-                         threshold=0.50, adversarial=False):
+                          threshold=0.50, adversarial=False,
+                          cache_path=None, rebuild_cache=False):
     from huggingface_hub import hf_hub_download
     batch_size = batch_size or _default_batch("java")
     print("\n" + "=" * 85)
@@ -311,13 +384,14 @@ def evaluate_hmcorp_java(sem_extractor, stat_extractor, batch_size=None,
         print(f"[!] Failed to download HMCorp Java dataset: {e}")
         return None
     balanced = _read_hmcorp(file_path, "java")
-    return _evaluate_external(balanced, "java", sem_extractor, stat_extractor,
+    return _evaluate_external_cached(balanced, "java", sem_extractor, stat_extractor,
                               batch_size, threshold, adversarial,
-                              f"HMCorp JAVA [{_model_tag(adversarial)}]")
+                              f"HMCorp JAVA [{_model_tag(adversarial)}]", cache_path, rebuild_cache)
 
 
 def evaluate_gptsniffer(sem_extractor, stat_extractor, batch_size=None,
-                        threshold=0.50, adversarial=False):
+                         threshold=0.50, adversarial=False,
+                         cache_path=None, rebuild_cache=False):
     batch_size = batch_size or _default_batch("java")
     print("\n" + "=" * 85)
     print("EXTERNAL 2023-ERA EVALUATION: GPTSniffer Dataset (Java)")
@@ -351,14 +425,19 @@ def evaluate_gptsniffer(sem_extractor, stat_extractor, batch_size=None,
     if not balanced:
         print("[!] No GPTSniffer samples parsed.")
         return None
-    return _evaluate_external(balanced, "java", sem_extractor, stat_extractor,
+    return _evaluate_external_cached(balanced, "java", sem_extractor, stat_extractor,
                               batch_size, threshold, adversarial,
-                              f"GPTSniffer JAVA [{_model_tag(adversarial)}]")
+                              f"GPTSniffer JAVA [{_model_tag(adversarial)}]", cache_path, rebuild_cache)
 
 
 def run_external(language="python", suite="all", batch_size=None, threshold=0.50,
-                 base_seed=42, adversarial=False):
-    """Run external suites for one model; returns {scenario: res} (None skipped)."""
+                 base_seed=42, adversarial=False, feature_cache_dir=None,
+                 rebuild_cache=False):
+    """Run external suites for one model; returns {scenario: res} (None skipped).
+
+    feature_cache_dir enables the extract-once .npz cache (None = extract
+    every call, exactly like before); rebuild_cache forces re-extraction.
+    """
     set_seed(base_seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Loading Hybrid Transformer models into GPU once...")
@@ -367,25 +446,39 @@ def run_external(language="python", suite="all", batch_size=None, threshold=0.50
     sem_fns = {"python": run_external_semeval_python,
                "java": run_external_semeval_java,
                "cpp": run_external_semeval_cpp}
+
+    def _cache(suite_key):
+        # I return None here when caching is off so suite fns take their
+        # original uncached path byte-for-byte.
+        if feature_cache_dir is None:
+            return None
+        return external_feature_cache_path(language, suite_key, base_seed,
+                                           feature_cache_dir)
+
     if suite in ("semeval_A", "all"):
         results["Ext SemEval-A"] = sem_fns[language](
-            "A", False, sem_extractor, stat_extractor, batch_size, threshold, adversarial)
+            "A", False, sem_extractor, stat_extractor, batch_size, threshold,
+            adversarial, _cache("semeval_A"), rebuild_cache)
     if suite in ("semeval_B", "all"):
         results["Ext SemEval-B"] = sem_fns[language](
-            "B", True, sem_extractor, stat_extractor, batch_size, threshold, adversarial)
+            "B", True, sem_extractor, stat_extractor, batch_size, threshold,
+            adversarial, _cache("semeval_B"), rebuild_cache)
     if suite in ("hmcorp", "all"):
         if language == "python":
             results["Ext HMCorp"] = evaluate_hmcorp_python(
-                sem_extractor, stat_extractor, batch_size, threshold, adversarial)
+                sem_extractor, stat_extractor, batch_size, threshold,
+                adversarial, _cache("hmcorp"), rebuild_cache)
         elif language == "java":
             results["Ext HMCorp"] = evaluate_hmcorp_java(
-                sem_extractor, stat_extractor, batch_size, threshold, adversarial)
+                sem_extractor, stat_extractor, batch_size, threshold,
+                adversarial, _cache("hmcorp"), rebuild_cache)
         else:
             print("[!] HMCorp OOD is not defined for C++ in the notebooks; skipping.")
     if suite in ("gptsniffer", "all"):
         if language == "java":
             results["Ext GPTSniffer"] = evaluate_gptsniffer(
-                sem_extractor, stat_extractor, batch_size, threshold, adversarial)
+                sem_extractor, stat_extractor, batch_size, threshold,
+                adversarial, _cache("gptsniffer"), rebuild_cache)
         elif suite == "gptsniffer":
             print("[!] GPTSniffer is Java-only in the notebooks; skipping.")
     print(f"\n[done] Hybrid external benchmarks finished for {language.upper()}.")
@@ -402,7 +495,13 @@ if __name__ == "__main__":
     parser.add_argument("--base_seed", type=int, default=42)
     parser.add_argument("--adversarial", action="store_true",
                         help="Evaluate the adversarially trained checkpoint instead of clean")
+    parser.add_argument("--feature-cache-dir", type=str, default=None,
+                        help="Enable the extract-once .npz cache in this directory")
+    parser.add_argument("--rebuild-cache", action="store_true",
+                        help="Force re-extraction even when a cache file exists")
     args = parser.parse_args()
     run_external(language=args.language, suite=args.suite, batch_size=args.batch_size,
                  threshold=args.threshold, base_seed=args.base_seed,
-                 adversarial=args.adversarial)
+                 adversarial=args.adversarial,
+                 feature_cache_dir=args.feature_cache_dir,
+                 rebuild_cache=args.rebuild_cache)

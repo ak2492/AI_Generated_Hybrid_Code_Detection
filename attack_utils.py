@@ -730,38 +730,85 @@ def safe_extract_authorship(code, auth_parser_fn):
 
 
 # =========================================================================
+#  Feature cache (extract-once, reuse-across-seeds)
+# =========================================================================
+# Attacked corpora depend only on (base_seed, mode, target, limit), never on
+# the training seed, so raw features are identical for seeds 42-46. I cache
+# the seed-independent raw triple on disk after the first seed; later seeds
+# load it and only redo the cheap per-seed scaling + inference.
+
+
+def _attack_source_mtime(language):
+    # I fingerprint the clean .npy bundle because a re-extraction (new
+    # main.py run) is the only local event that can change raw features.
+    try:
+        return int(os.path.getmtime(f"{language}_test_X.npy"))
+    except OSError:
+        return 0
+
+
+def attack_feature_cache_path(language, attack_name, mode, target, base_seed,
+                              limit, cache_dir="."):
+    lim = "full" if limit is None else f"lim{limit}"
+    return os.path.join(
+        cache_dir,
+        f"{language}_atkfeat_{attack_name}_{mode}_{target}"
+        f"_b{base_seed}_{lim}_m{_attack_source_mtime(language)}.npz")
+
+
+def save_cached_attack_features(path, feat):
+    np.savez_compressed(path, sem=feat["sem_feature"], stat=feat["stat_feature"],
+                        auth=feat["auth_feature"], labels=feat["labels"])
+    print(f"  Cached attack features -> {path} (later seeds skip extraction)")
+
+
+def load_cached_attack_features(path):
+    try:
+        z = np.load(path, allow_pickle=False)
+    except (OSError, ValueError):
+        return None
+    try:
+        sem, stat, auth, labels = z["sem"], z["stat"], z["auth"], z["labels"]
+    except KeyError:
+        return None
+    # I validate shapes here because a half-written or foreign .npz must
+    # never silently poison a seed run; any mismatch forces re-extraction.
+    if sem.ndim != 2 or sem.shape[1] != 768:
+        return None
+    if stat.ndim != 2 or stat.shape[1] != 7:
+        return None
+    if auth.ndim != 2 or auth.shape[1] != 38:
+        return None
+    if not (sem.shape[0] == stat.shape[0] == auth.shape[0] == labels.shape[0]):
+        return None
+    print(f"  Loaded cached attack features from {path} (no re-extraction)")
+    return {"sem_feature": sem, "stat_feature": stat, "auth_feature": auth,
+            "labels": labels, "X": np.hstack((sem, stat, auth)),
+            "t_attack": 0.0, "t_sem": 0.0, "t_stat": 0.0, "t_auth": 0.0}
+
+
+# =========================================================================
 #  Main evaluation pipeline (used by every attack script)
 # =========================================================================
 
-def run_attack_evaluation(language, attack_name, apply_attack_fn,
-                          batch_size=32, limit=None, base_seed=42,
-                          attack_all_samples=False, adversarial=False,
-                          attack_layer="full", mode="enhanced",
-                          transductive_scaler=False, clean_cache=None):
-    """End-to-end evaluation pipeline supporting isolated (paper Sec 4.7) and full attacks.
+def extract_attack_features(language, attack_name, apply_attack_fn,
+                            batch_size=32, limit=None, base_seed=42,
+                            attack_all_samples=False,
+                            attack_layer="full", mode="enhanced",
+                            clean_cache=None):
+    """Seed-INDEPENDENT half of run_attack_evaluation: load data, apply the
+    attack transform, and extract the raw (unscaled) feature triple.
 
-    Parameters
-    ----------
-    language           : "python" | "java" | "cpp"
-    attack_name        : display name (e.g. "authorship", "statistical")
-    apply_attack_fn    : callable(code: str, idx: int) -> str
-    batch_size         : batch size for CodeT5+ / CodeBERT
-    limit              : optional cap on test-set size (for quick debugging)
-    base_seed          : random seed
-    attack_all_samples : whether to attack all samples or machine samples only
-    adversarial        : whether to evaluate the adversarially fine-tuned model
-    attack_layer       : "auth" | "stat" | "sem" | "full" | "clean"
-    mode               : "basic" (paper faithful) | "enhanced"
-    transductive_scaler: whether to fit StandardScaler on test set (for diagnostic testing)
-    clean_cache        : optional pre-extracted (clean_sem, clean_stat, clean_auth) tuple
+    Nothing here depends on the training seed or the fitted scaler, so the
+    returned dict is identical for seeds 42-46 and safe to cache on disk.
+    Prints and timings are unchanged from the original pipeline.
     """
     set_seed(base_seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # I time every stage like the CPG cost helper so both folders report the
     # same Latency_ms / Throughput / PeakRAM_MB cost keys.
-    t_total_start = time.perf_counter()
-    rss_start = current_rss_mb()
+    # (t_total_start/rss_start live in the score half; see score_attack_features.)
     t_attack = t_sem = t_stat = t_auth = 0.0
 
     print(f"\n{'=' * 60}")
@@ -905,6 +952,35 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     X = np.hstack((sem_feature, stat_feature, auth_feature))
     print(f"  Feature matrix assembled: {X.shape} (isolated={is_isolated})")
 
+    return {
+        "sem_feature": sem_feature, "stat_feature": stat_feature,
+        "auth_feature": auth_feature, "labels": labels, "X": X,
+        "t_attack": t_attack, "t_sem": t_sem, "t_stat": t_stat,
+        "t_auth": t_auth,
+    }
+
+
+def score_attack_features(feat, language, attack_name, mode="enhanced",
+                          adversarial=False, transductive_scaler=False,
+                          t_total_start=None, rss_start=None):
+    """Seed-DEPENDENT half of run_attack_evaluation: scale with this seed's
+    fitted scaler, run inference, and report metrics.
+
+    Prints, metrics, cost keys, and the return dict are identical to the
+    original end-to-end pipeline.
+    """
+    X = feat["X"]
+    labels = feat["labels"]
+    t_attack = feat.get("t_attack", 0.0)
+    t_sem = feat.get("t_sem", 0.0)
+    t_stat = feat.get("t_stat", 0.0)
+    t_auth = feat.get("t_auth", 0.0)
+    if t_total_start is None:
+        t_total_start = time.perf_counter()
+    if rss_start is None:
+        rss_start = current_rss_mb()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
     if transductive_scaler:
         from sklearn.preprocessing import StandardScaler
         print("  Applying transductive test-set scaling (diagnostic mode) …")
@@ -970,7 +1046,57 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
         "precision": prec, "recall": rec, "fpr": fpr,
         "tn": tn, "fp": fp, "fn": fn, "tp": tp,
         "probs": probs, "preds": preds, "labels": labels,
-        "features": (sem_feature, stat_feature, auth_feature),
+        "features": (feat["sem_feature"], feat["stat_feature"], feat["auth_feature"]),
         "Latency_ms": latency_ms, "Throughput": throughput,
         "PeakRAM_MB": peak_ram_mb,
     }
+
+
+def run_attack_evaluation(language, attack_name, apply_attack_fn,
+                          batch_size=32, limit=None, base_seed=42,
+                          attack_all_samples=False, adversarial=False,
+                          attack_layer="full", mode="enhanced",
+                          transductive_scaler=False, clean_cache=None,
+                          feature_cache_dir=None, rebuild_cache=False):
+    """End-to-end evaluation pipeline supporting isolated (paper Sec 4.7) and full attacks.
+
+    Parameters
+    ----------
+    language           : "python" | "java" | "cpp"
+    attack_name        : display name (e.g. "authorship", "statistical")
+    apply_attack_fn    : callable(code: str, idx: int) -> str
+    batch_size         : batch size for CodeT5+ / CodeBERT
+    limit              : optional cap on test-set size (for quick debugging)
+    base_seed          : random seed
+    attack_all_samples : whether to attack all samples or machine samples only
+    adversarial        : whether to evaluate the adversarially fine-tuned model
+    attack_layer       : "auth" | "stat" | "sem" | "full" | "clean"
+    mode               : "basic" (paper faithful) | "enhanced"
+    transductive_scaler: whether to fit StandardScaler on test set (for diagnostic testing)
+    clean_cache        : optional pre-extracted (clean_sem, clean_stat, clean_auth) tuple
+    feature_cache_dir  : optional directory for the extract-once .npz cache
+                         (None = extract every call, exactly like before)
+    rebuild_cache      : force re-extraction even when a cache file exists
+    """
+    # I start total-time/RAM accounting here so cached and fresh paths
+    # report comparable totals.
+    t_total_start = time.perf_counter()
+    rss_start = current_rss_mb()
+    target = "all" if attack_all_samples else "machine"
+    if feature_cache_dir is not None:
+        cache_path = attack_feature_cache_path(
+            language, attack_name, mode, target, base_seed, limit,
+            feature_cache_dir)
+        feat = None if rebuild_cache else load_cached_attack_features(cache_path)
+        if feat is None:
+            feat = extract_attack_features(
+                language, attack_name, apply_attack_fn, batch_size, limit,
+                base_seed, attack_all_samples, attack_layer, mode, clean_cache)
+            save_cached_attack_features(cache_path, feat)
+    else:
+        feat = extract_attack_features(
+            language, attack_name, apply_attack_fn, batch_size, limit,
+            base_seed, attack_all_samples, attack_layer, mode, clean_cache)
+    return score_attack_features(
+        feat, language, attack_name, mode, adversarial,
+        transductive_scaler, t_total_start, rss_start)
