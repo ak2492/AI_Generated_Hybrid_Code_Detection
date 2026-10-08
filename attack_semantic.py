@@ -45,9 +45,6 @@ def main():
         attack_layer = "sem"
     else:
         def apply_attack(code, idx):
-            # I use the shuffled enhanced variant here because I think a fixed
-            # serial order is too learnable; same seed+idx gives same sample
-            # in both folders.
             rng_shuf = random.Random(args.base_seed + idx + SHUFFLE_SALT)
             mod, _ = meaning_preserving_rename_enhanced_shuffled(
                 code, ts_parser, args.language, config, rng_shuf)

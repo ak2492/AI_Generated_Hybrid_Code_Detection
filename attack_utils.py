@@ -480,9 +480,8 @@ def meaning_preserving_rename_enhanced(code_str, parser, language, config):
         
         code_bytes_raw = bytes(code_str, "utf8")
         tree = parser.parse(code_bytes_raw)
-        string_types = {"string", "string_literal", "concatenated_string", "template_string", "raw_string_literal"}
+        string_types = {"string", "string_literal", "concatenated_string", "template_string", "raw_string_literal", "character_literal", "char_literal"}
         string_nodes = [n for n in _iter_nodes(tree.root_node) if n.type in string_types and (not n.parent or n.parent.type != "expression_statement")]
-        
         if string_nodes:
             string_nodes.sort(key=lambda n: n.start_byte, reverse=True)
             code_bytes = bytearray(code_bytes_raw)
@@ -495,26 +494,15 @@ def meaning_preserving_rename_enhanced(code_str, parser, language, config):
                 code_bytes[node.start_byte:node.end_byte] = bytes(replacement, "utf8")
                 n_transforms += 1
             code_str = code_bytes.decode("utf8", errors="ignore")
-        
         if language == "python": code_str = re.sub(r'print\s*\(([^)]*)\)', 'print("output")', code_str)
         elif language == "java": code_str = re.sub(r'System\.out\.println\s*\(([^)]*)\)', 'System.out.println("output")', code_str)
         elif language == "cpp": code_str = re.sub(r'(std::)?cout\s*<<[^;]*;', 'std::cout << "output" << std::endl;', code_str)
+        code_str = re.sub(r'\b([2-9]|[1-9][0-9]+)\b', lambda m: hex(int(m.group(0))), code_str)
         return code_str, n_transforms
     except Exception: return code_str, 0
 
 
 def meaning_preserving_rename_enhanced_shuffled(code_str, parser, language, config, rng=None):
-    """Enhanced semantic with randomized naming (v7,v3,v1...), same scope as enhanced.
-
-    I shuffle the v_i assignment with a seeded RNG because I think a fixed
-    serial order lets a model latch onto position, while a shuffled yet
-    bijective map stays equally valid code. I keep func/class names in scope
-    where safely changeable (user-defined defs) and I protect keywords,
-    builtins and dunders. I rename consistently everywhere (no attribute-tail
-    skip, like enhanced) because I think splitting def and use would break
-    call edges and look like noise rather than a real obfuscation attack.
-    Returns (new_code, n_transforms).
-    """
     try:
         if not code_str or len(code_str) > MAX_CODE_SIZE: return code_str, 0
         import random as _random
@@ -524,24 +512,20 @@ def meaning_preserving_rename_enhanced_shuffled(code_str, parser, language, conf
         id_types = LANG_ID_TYPES[language]
         builtins = LANG_BUILTINS.get(language, set())
         allowed = ENHANCED_VAR_PARENTS[language]
-
         target_names = set()
         all_id_nodes = [n for n in _iter_nodes(tree.root_node) if n.type in id_types]
-
         for node in all_id_nodes:
             pt = node.parent.type if node.parent else ""
             if pt in allowed:
                 name = code_bytes_raw[node.start_byte:node.end_byte].decode("utf8", errors="ignore")
                 if name and name not in config["reserved"] and name not in builtins and not name.startswith("__"):
                     target_names.add(name)
-
         if not target_names: return code_str, 0
         ordered = sorted(target_names)
         perm = [f"v_{i+1}" for i in range(len(ordered))]
         r = rng if rng is not None else _random.Random(42 + SHUFFLE_SALT)
         r.shuffle(perm)
         var_map = {n: p for n, p in zip(ordered, perm)}
-
         all_id_nodes.sort(key=lambda n: n.start_byte, reverse=True)
         code_bytes = bytearray(code_bytes_raw)
         for node in all_id_nodes:
@@ -550,12 +534,10 @@ def meaning_preserving_rename_enhanced_shuffled(code_str, parser, language, conf
                 code_bytes[node.start_byte:node.end_byte] = bytes(var_map[name], "utf8")
                 n_transforms += 1
         code_str = code_bytes.decode("utf8", errors="ignore")
-
         code_bytes_raw = bytes(code_str, "utf8")
         tree = parser.parse(code_bytes_raw)
-        string_types = {"string", "string_literal", "concatenated_string", "template_string", "raw_string_literal"}
+        string_types = {"string", "string_literal", "concatenated_string", "template_string", "raw_string_literal", "character_literal", "char_literal"}
         string_nodes = [n for n in _iter_nodes(tree.root_node) if n.type in string_types and (not n.parent or n.parent.type != "expression_statement")]
-
         if string_nodes:
             string_nodes.sort(key=lambda n: n.start_byte, reverse=True)
             code_bytes = bytearray(code_bytes_raw)
@@ -568,10 +550,10 @@ def meaning_preserving_rename_enhanced_shuffled(code_str, parser, language, conf
                 code_bytes[node.start_byte:node.end_byte] = bytes(replacement, "utf8")
                 n_transforms += 1
             code_str = code_bytes.decode("utf8", errors="ignore")
-
         if language == "python": code_str = re.sub(r'print\s*\(([^)]*)\)', 'print("output")', code_str)
         elif language == "java": code_str = re.sub(r'System\.out\.println\s*\(([^)]*)\)', 'System.out.println("output")', code_str)
         elif language == "cpp": code_str = re.sub(r'(std::)?cout\s*<<[^;]*;', 'std::cout << "output" << std::endl;', code_str)
+        code_str = re.sub(r'\b([2-9]|[1-9][0-9]+)\b', lambda m: hex(int(m.group(0))), code_str)
         return code_str, n_transforms
     except Exception: return code_str, 0
 
@@ -635,18 +617,12 @@ def apply_statistical_attack_basic(code_str, rng, language="python"):
 
 
 def apply_statistical_attack_enhanced_identical(code_str, rng, language="python"):
-    """Identical enhanced-stat in both folders (stronger than basic, still valid).
-
-    I use trailing 1-6 on every line, blanks at 25%, indent 0-10 for Java/C++
-    and per-file style switch for Python because I want a visibly stronger
-    layout attack than basic (1-4/15%/0-8) that still parses. I keep Python
-    per-file because I think per-line would break blocks and stop testing
-    detection. Same seed+idx gives same output both folders.
-    """
+    if not code_str or len(code_str) > MAX_CODE_SIZE:
+        return code_str
     lines = code_str.split("\n")
     new_lines = []
     if language == "python":
-        indent_style = rng.choice(["two_space", "tab", "three_space", "four_space"])
+        indent_style = rng.choice(["two_space", "tab", "three_space", "four_space", "single_space", "eight_space"])
         for line in lines:
             stripped = line.strip()
             if stripped:
@@ -658,27 +634,61 @@ def apply_statistical_attack_enhanced_identical(code_str, rng, language="python"
                     base_indent = "\t" * indent_level
                 elif indent_style == "three_space":
                     base_indent = "   " * indent_level
+                elif indent_style == "single_space":
+                    base_indent = " " * indent_level
+                elif indent_style == "eight_space":
+                    base_indent = "        " * indent_level
                 else:
                     base_indent = "    " * indent_level
-                trailing = " " * rng.randint(1, 6)
+                trailing = " " * rng.randint(1, 8)
+                if rng.random() < 0.30:
+                    trailing = trailing + "\t" * rng.randint(1, 2)
                 new_lines.append(base_indent + stripped + trailing)
-                if rng.random() < 0.25:
+                if rng.random() < 0.35:
                     new_lines.append("")
+                    if rng.random() < 0.20:
+                        new_lines.append("")
             else:
-                if rng.random() < 0.5:
+                if rng.random() < 0.50:
                     new_lines.append("")
     else:
         for line in lines:
             stripped = line.strip()
             if stripped:
-                indent = " " * rng.randint(0, 10)
-                trailing = " " * rng.randint(1, 6)
+                indent = " " * rng.randint(0, 12)
+                trailing = " " * rng.randint(1, 8)
+                if rng.random() < 0.30:
+                    trailing = trailing + "\t" * rng.randint(1, 2)
                 new_lines.append(indent + stripped + trailing)
-                if rng.random() < 0.25:
+                if rng.random() < 0.35:
                     new_lines.append("")
+                    if rng.random() < 0.20:
+                        new_lines.append("")
             else:
-                if rng.random() < 0.5:
+                if rng.random() < 0.50:
                     new_lines.append("")
+    return "\n".join(new_lines)
+
+
+def normalize_layout_enhanced_identical(code_str):
+    if not code_str or len(code_str) > MAX_CODE_SIZE:
+        return code_str
+    lines = code_str.split("\n")
+    lines = [l.rstrip() for l in lines]
+    new_lines = []
+    prev_blank = False
+    for line in lines:
+        if not line.strip():
+            if not prev_blank:
+                new_lines.append("")
+            prev_blank = True
+        else:
+            new_lines.append(line)
+            prev_blank = False
+    while new_lines and not new_lines[0].strip():
+        new_lines.pop(0)
+    while new_lines and not new_lines[-1].strip():
+        new_lines.pop()
     return "\n".join(new_lines)
 
 

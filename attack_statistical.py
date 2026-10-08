@@ -41,9 +41,6 @@ def main():
         attack_layer = "stat"
     else:
         def apply_attack(code, idx):
-            # Identical enhanced-stat both folders, stronger than basic.
-            # I use 1-6/25%/0-10 here because I want a visibly stronger yet
-            # still parsing attack; same seed+idx gives same sample both sides.
             rng = random.Random(args.base_seed + idx)
             return apply_statistical_attack_enhanced_identical(
                 code, rng, language=args.language)

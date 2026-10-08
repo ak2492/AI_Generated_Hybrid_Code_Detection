@@ -13,9 +13,11 @@ from attack_utils import (
     set_seed, get_language_config, get_ts_parser,
     strip_comments, strip_comments_enhanced,
     normalize_naming_style, normalize_layout,
+    normalize_layout_enhanced_identical,
     meaning_preserving_rename, meaning_preserving_rename_enhanced,
     meaning_preserving_rename_enhanced_shuffled, SHUFFLE_SALT,
     apply_statistical_attack, apply_statistical_attack_basic,
+    apply_statistical_attack_enhanced_identical,
     run_attack_evaluation,
 )
 
@@ -51,16 +53,14 @@ def main():
         attack_layer = "full"
     else:
         def apply_attack(code, idx):
-            # Identical enhanced-full in both folders: auth + sem stacked,
-            # layout/stat skipped. I skip them because I think randomizing
-            # indent/blanks would hurt CPG as much as Hybrid and erase the
-            # 20% relative margin I want to keep. Same seed+idx gives same
-            # sample in both folders.
             code, _ = strip_comments(code, ts_parser, args.language)
             code, _ = normalize_naming_style(code, ts_parser, args.language, config)
+            code = normalize_layout_enhanced_identical(code)
             rng_shuf = random.Random(args.base_seed + idx + SHUFFLE_SALT)
             code, _ = meaning_preserving_rename_enhanced_shuffled(
                 code, ts_parser, args.language, config, rng_shuf)
+            rng = random.Random(args.base_seed + idx)
+            code = apply_statistical_attack_enhanced_identical(code, rng, language=args.language)
             return code
         name = "full-enhanced"
         attack_all = (args.target == "all")

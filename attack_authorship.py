@@ -16,6 +16,7 @@ from attack_utils import (
     set_seed, get_language_config, get_ts_parser,
     strip_comments, strip_comments_enhanced,
     normalize_naming_style, normalize_layout,
+    normalize_layout_enhanced_identical,
     run_attack_evaluation,
 )
 
@@ -44,12 +45,9 @@ def main():
         attack_layer = "auth"
     else:
         def apply_attack(code, idx):
-            # Identical enhanced-auth in both folders: comments+docstrings +
-            # snake normalization, layout untouched. I skip layout here
-            # because I think it would collapse CPG indent macros
-            # symmetrically and erase the 20% relative gap I want.
             mod, _ = strip_comments(code, ts_parser, args.language)
             mod, _ = normalize_naming_style(mod, ts_parser, args.language, config)
+            mod = normalize_layout_enhanced_identical(mod)
             return mod
         name = "authorship-enhanced"
         attack_all = (args.target == "all")

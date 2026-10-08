@@ -28,6 +28,7 @@ from attack_utils import (
     set_seed, get_language_config, get_ts_parser, get_auth_parser, safe_extract_authorship,
     strip_comments, strip_comments_enhanced,
     normalize_naming_style, normalize_layout,
+    normalize_layout_enhanced_identical,
     meaning_preserving_rename, meaning_preserving_rename_enhanced,
     meaning_preserving_rename_enhanced_shuffled, SHUFFLE_SALT,
     apply_statistical_attack, apply_statistical_attack_basic,
@@ -53,9 +54,9 @@ def get_attacked_corpus(codes, labels, attack_type, language, mode="enhanced", b
                 if mode == "basic":
                     c_mod, k = strip_comments(c_mod, parser, language)
                 else:
-                    # Identical enhanced-auth: strip + snake, no layout (holds gap).
                     c_mod, _ = strip_comments(c_mod, parser, language)
                     c_mod, k = normalize_naming_style(c_mod, parser, language, config)
+                    c_mod = normalize_layout_enhanced_identical(c_mod)
                 n_comment += k
                 if k:
                     n_comment_samples += 1
@@ -74,12 +75,9 @@ def get_attacked_corpus(codes, labels, attack_type, language, mode="enhanced", b
             if attack_type in ["stat", "full"]:
                 if mode == "basic":
                     c_mod = apply_statistical_attack_basic(c_mod, rng, language=language)
-                elif attack_type == "stat":
-                    # Identical enhanced-stat both folders, stronger than basic.
+                else:
                     c_mod = apply_statistical_attack_enhanced_identical(
                         c_mod, rng, language=language)
-                # I skip stat for enhanced-full to preserve the 20% CPG margin;
-                # full-enhanced is auth+sem stacked, still a real obfuscation.
 
         attacked_codes.append(c_mod)
 
