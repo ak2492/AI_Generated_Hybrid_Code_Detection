@@ -398,7 +398,11 @@ def evaluate_gptsniffer(sem_extractor, stat_extractor, batch_size=None,
     print("=" * 85)
     if not os.path.exists("GPTSniffer"):
         print("Cloning GPTSniffer repository...")
-        subprocess.run(["git", "clone", "https://huggingface.co/datasets/mahirlabibdihan/GPTSniffer"], check=True)
+        try:
+            subprocess.run(["git", "clone", "https://huggingface.co/datasets/mahirlabibdihan/GPTSniffer"], check=True)
+        except Exception as e:
+            print(f"[!] GPTSniffer clone failed (offline Kaggle?): {e}. Skipping suite.")
+            return None
     human_samples, ai_samples = [], []
     files = glob.glob("GPTSniffer/test/*.java") + glob.glob("GPTSniffer/train/*.java")
     for filepath in files:

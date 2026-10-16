@@ -347,7 +347,10 @@ if __name__ == "__main__":
                 continue
             script = os.path.join("..", "cpg-based-ai-generated-code-detection",
                                   "tools", "hf_upload", "upload_seed_models.py")
-            subprocess.run([sys.executable, script, "--model-dir", ".",
-                            "--repo", args.upload_repo,
-                            "--pattern", "*_seed*.pt",
-                            "--pattern", "*_seed*.pkl"], check=True)
+            if not os.path.exists(script):
+                print(f"[!] Upload script not found at {script}; skipping upload.")
+            else:
+                try:
+                    subprocess.run([sys.executable, script, "--model-dir", ".", "--repo", args.upload_repo, "--pattern", "*_seed*.pt", "--pattern", "*_seed*.pkl"], check=True)
+                except Exception as e:
+                    print(f"[!] Upload failed: {e}; continuing without upload.")

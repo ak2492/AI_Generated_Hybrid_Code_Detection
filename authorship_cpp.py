@@ -5,8 +5,24 @@ import tree_sitter_cpp as tscpp
 from tree_sitter import Language, Parser
 
 sys.setrecursionlimit(10000)
-CPP_LANGUAGE = Language(tscpp.language())
-parser = Parser(CPP_LANGUAGE)
+
+
+def _build_parser(lang_mod):
+    # Version-tolerant init: old API Parser(lang), new API Parser() + .language.
+    raw = lang_mod.language()
+    lang = raw if type(raw).__name__ == "Language" else Language(raw)
+    try:
+        return lang, Parser(lang)
+    except TypeError:
+        p = Parser()
+        try:
+            p.language = lang
+        except Exception:
+            p.set_language(lang)
+        return lang, p
+
+
+CPP_LANGUAGE, parser = _build_parser(tscpp)
 
 def extract_cpp_authorship(code):
     features = np.zeros(38)

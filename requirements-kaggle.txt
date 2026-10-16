@@ -1,0 +1,15 @@
+# Kaggle install: base image already ships torch, numpy, pandas,
+# scikit-learn, tqdm, joblib. Reinstalling them (esp. torch) wastes
+# time and forces source builds (tokenizers Rust build failure).
+# Run in Kaggle as:
+#   !pip install --upgrade pip
+#   !pip install --prefer-binary -r requirements-kaggle.txt
+# Requires Internet ON.
+transformers==4.40.0
+tokenizers==0.19.1
+huggingface_hub==0.23.0
+datasets==2.19.1
+tree-sitter==0.26.0
+tree-sitter-java==0.23.5
+tree-sitter-cpp==0.23.4
+tree-sitter-python==0.25.0
