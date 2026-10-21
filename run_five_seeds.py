@@ -20,6 +20,7 @@ overnight Kaggle job. Basic isolated suites reuse {language}_test_X.npy.
 """
 import argparse
 import gc
+import json
 import os
 import random
 import shutil
@@ -37,6 +38,7 @@ from attack_utils import (
     get_ts_parser,
     meaning_preserving_rename,
     meaning_preserving_rename_enhanced_shuffled,
+    normalize_layout_enhanced_identical,
     normalize_naming_style,
     run_attack_evaluation,
     set_seed,
@@ -44,12 +46,13 @@ from attack_utils import (
 )
 from evaluate import evaluate_model
 from external_eval import run_external
+from threshold import compute_seed_threshold, test_prior
 from train import train_model
 
 LANGUAGES = ["python", "java", "cpp"]
 METRIC_COLS = ["Acc", "Prec", "Rec", "F1", "ROC", "FPR",
                "Latency_ms", "Throughput", "PeakRAM_MB", "N"]
-COLUMNS = (["Language", "Variant", "Seed", "Scenario", "TrainValF1"]
+COLUMNS = (["Language", "Variant", "Seed", "Scenario", "Threshold", "TrainValF1"]
            + METRIC_COLS)
 
 
@@ -83,9 +86,15 @@ def _default_batch(language):
     return 64 if language == "python" else (32 if language == "java" else 16)
 
 
-def _attack_suites(language, base_seed, target):
+def _attack_suites(language, base_seed, target, force_full=False):
     """(scenario, name, attack_layer, mode, apply_attack_fn) — I mirror the
-    four attack_*.py wrappers exactly, including layer/mode labels."""
+    four attack_*.py wrappers exactly, including layer/mode labels.
+
+    `force_full=True` recomputes every feature block for every transform,
+    which is what the CPG model necessarily does (it has no 813-d feature
+    groups to isolate). Use it for the cross-model comparison; keep the
+    default for the paper-style isolated Table 9 reproduction.
+    """
     config = get_language_config(language)
     ts_parser = get_ts_parser(config["lang_obj"])
     attack_all = (target == "all")
@@ -95,9 +104,12 @@ def _attack_suites(language, base_seed, target):
         return mod
 
     def auth_enhanced(code, idx):
+        # Must stay byte-identical to attack_authorship.py --enhanced and to
+        # the CPG's enhanced-auth path: comments -> snake_case -> layout
+        # normalization. The old version skipped the last step.
         mod, _ = strip_comments(code, ts_parser, language)
         mod, _ = normalize_naming_style(mod, ts_parser, language, config)
-        return mod
+        return normalize_layout_enhanced_identical(mod)
 
     def stat_basic(code, idx, _b=base_seed, _l=language):
         return apply_statistical_attack_basic(code, random.Random(_b + idx), language=_l)
@@ -123,14 +135,23 @@ def _attack_suites(language, base_seed, target):
         return apply_statistical_attack_basic(code, rng, language=_l)
 
     def full_enhanced(code, idx, _b=base_seed, _l=language):
+        # Must stay byte-identical to attack_full.py --enhanced and to the
+        # CPG's enhanced-full path: auth (comments -> snake_case -> layout
+        # normalization) -> semantic (shuffled rename) -> statistical.
+        # The old version stopped after the semantic step, so the 5-seed
+        # "Full (Enhanced)" row was really Auth+Sem and never saw the
+        # statistical layer that collapses C++.
         code, _ = strip_comments(code, ts_parser, _l)
         code, _ = normalize_naming_style(code, ts_parser, _l, config)
+        code = normalize_layout_enhanced_identical(code)
         rng_shuf = random.Random(_b + idx + SHUFFLE_SALT)
         code, _ = meaning_preserving_rename_enhanced_shuffled(
             code, ts_parser, _l, config, rng_shuf)
-        return code
+        rng_stat = random.Random(_b + idx)
+        return apply_statistical_attack_enhanced_identical(
+            code, rng_stat, language=_l)
 
-    return [
+    suites = [
         ("Auth (Basic)", "authorship-basic", "auth", "basic", auth_basic, attack_all),
         ("Auth (Enhanced)", "authorship-enhanced", "full", "enhanced", auth_enhanced, attack_all),
         ("Stat (Basic)", "statistical-basic", "stat", "basic", stat_basic, attack_all),
@@ -140,16 +161,27 @@ def _attack_suites(language, base_seed, target):
         ("Full (Basic)", "full-basic", "full", "basic", full_basic, attack_all),
         ("Full (Enhanced)", "full-enhanced", "full", "enhanced", full_enhanced, attack_all),
     ]
+    if force_full:
+        suites = [(scenario, name, "full", mode, fn, attack_all)
+                  for scenario, name, _layer, mode, fn, attack_all in suites]
+    return suites
 
 
 def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None,
                  learning_rate=1e-5, threshold=0.50, base_seed=42, target="machine",
                  skip_external=False, out_csv=None, resume=False,
-                 feature_cache_dir=".", rebuild_cache=False):
+                 feature_cache_dir=".", rebuild_cache=False,
+                 threshold_mode="fixed", attack_eval="isolated"):
     variant = "adv" if adversarial else "clean"
     tag = "ADV" if adversarial else "CLEAN"
+    if threshold_mode not in ("fixed", "calibrated"):
+        raise ValueError(f"Unknown threshold_mode {threshold_mode!r}")
+    if attack_eval not in ("isolated", "full"):
+        raise ValueError(f"Unknown attack_eval {attack_eval!r}")
     if batch_size is None:
         batch_size = _default_batch(language)
+    eval_prior = test_prior(language) if threshold_mode == "calibrated" else None
+    thresholds = {}
     (ckpt_canon, ckpt_tpl), (scaler_canon, scaler_tpl) = _artifact_names(language, adversarial)
     rows = []
     prev_all = None
@@ -204,7 +236,8 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                 return
             rows.append({
                 "Language": language, "Variant": variant, "Seed": seed,
-                "Scenario": scenario, "TrainValF1": best_f1,
+                "Scenario": scenario, "Threshold": seed_threshold,
+                "TrainValF1": best_f1,
                 "Acc": res["Acc"], "Prec": res["Prec"], "Rec": res["Rec"],
                 "F1": res["F1"], "ROC": res["ROC"], "FPR": res["FPR"],
                 "Latency_ms": res["Latency_ms"], "Throughput": res["Throughput"],
@@ -212,18 +245,35 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
             })
 
         _restore()
+        if threshold_mode == "calibrated":
+            # Same rule as the CPG checkpoint threshold: clean validation,
+            # F1-argmax reweighted to the eval prior, cross-validated, and
+            # only kept when it beats the fixed cut. No attack data is used.
+            seed_threshold = compute_seed_threshold(
+                language, adversarial=adversarial, fallback=threshold,
+                prior=eval_prior)
+            print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} "
+                  f"(clean-val calibrated; eval prior {eval_prior:.4f})")
+        else:
+            seed_threshold = float(threshold)
+            print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} (fixed)")
+        thresholds[str(seed)] = seed_threshold
+
         _row("Clean Test", evaluate_model(language=language, batch_size=batch_size,
-                                          adversarial=adversarial))
+                                          adversarial=adversarial,
+                                          threshold=seed_threshold))
 
         for scenario, name, layer, mode, fn, attack_all in _attack_suites(
-                language, base_seed, target):
+                language, base_seed, target,
+                force_full=(attack_eval == "full")):
             _restore()
             res = run_attack_evaluation(
                 language, name, fn, batch_size, None, base_seed,
                 attack_all_samples=attack_all, adversarial=adversarial,
                 attack_layer=layer, mode=mode,
                 feature_cache_dir=feature_cache_dir,
-                rebuild_cache=rebuild_cache)
+                rebuild_cache=rebuild_cache,
+                threshold=seed_threshold)
             if res is None:
                 continue
             _row(scenario, {"Acc": res["accuracy"], "Prec": res["precision"],
@@ -245,7 +295,8 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
         if not skip_external:
             _restore()
             ext_results = run_external(language=language, suite="all",
-                                       batch_size=batch_size, threshold=threshold,
+                                       batch_size=batch_size,
+                                       threshold=seed_threshold,
                                        base_seed=base_seed, adversarial=adversarial,
                                        feature_cache_dir=feature_cache_dir,
                                        rebuild_cache=rebuild_cache)
@@ -262,6 +313,16 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
     df_all = pd.DataFrame(rows, columns=COLUMNS)
     if out_csv:
         df_all.to_csv(out_csv, index=False)
+        # Keep the per-seed cuts next to the CSV so an attack run can be
+        # reproduced (or audited) without reloading every checkpoint.
+        thr_path = os.path.splitext(out_csv)[0] + "_thresholds.json"
+        with open(thr_path, "w", encoding="utf-8") as fh:
+            json.dump({"language": language, "variant": variant,
+                       "threshold_mode": threshold_mode,
+                       "fallback": float(threshold),
+                       "eval_prior": eval_prior,
+                       "thresholds": thresholds}, fh, indent=2)
+        print(f"[i] Wrote per-seed thresholds -> {thr_path}")
     return df_all
 
 
@@ -296,7 +357,17 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
-    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--threshold", type=float, default=0.50,
+                        help="Fixed decision cut (also the fallback for calibrated mode)")
+    parser.add_argument("--threshold-mode", type=str, default="fixed",
+                        choices=["fixed", "calibrated"],
+                        help="'fixed' = paper Table 9 protocol at --threshold; "
+                             "'calibrated' = CPG clean-val rule, same for every attack")
+    parser.add_argument("--attack-eval", type=str, default="isolated",
+                        choices=["isolated", "full"],
+                        help="'isolated' = paper-style feature-block isolation; "
+                             "'full' = recompute every block under each transform, "
+                             "matching the CPG model's whole-model evaluation")
     parser.add_argument("--base_seed", type=int, default=42,
                         help="Fixed attack-sampling seed (keep 42 so attacked sets match across training seeds)")
     parser.add_argument("--target", type=str, default="machine", choices=["machine", "all"])
@@ -325,8 +396,12 @@ if __name__ == "__main__":
     # I pass None (not ".") when caching is off so library code takes its
     # original uncached path byte-for-byte.
     feature_cache_dir = None if args.no_feature_cache else args.cache_dir
+    # Never overwrite the paper-faithful fixed-0.50 table with the
+    # calibrated secondary table.
+    thr_suffix = "" if args.threshold_mode == "fixed" else "_calibrated"
+    atk_suffix = "" if args.attack_eval == "isolated" else "_fullmodel"
     for lang in langs:
-        out_csv = f"five_seed_{lang}_{variant}.csv"
+        out_csv = f"five_seed_{lang}_{variant}{thr_suffix}{atk_suffix}.csv"
         df_all = run_language(lang, seeds, adversarial=args.adversarial,
                               epochs=args.epochs, batch_size=args.batch_size,
                               learning_rate=args.learning_rate,
@@ -335,9 +410,13 @@ if __name__ == "__main__":
                               skip_external=args.skip_external,
                               out_csv=out_csv, resume=args.resume,
                               feature_cache_dir=feature_cache_dir,
-                              rebuild_cache=args.rebuild_cache)
+                              rebuild_cache=args.rebuild_cache,
+                              threshold_mode=args.threshold_mode,
+                              attack_eval=args.attack_eval)
         summary = summarize(df_all[df_all["Language"] == lang])
-        summary.to_csv(f"five_seed_{lang}_{variant}_summary.csv", index=False)
+        summary.to_csv(
+            f"five_seed_{lang}_{variant}{thr_suffix}{atk_suffix}_summary.csv",
+            index=False)
 
         if args.upload:
             # I require an explicit repo and never default to a personal

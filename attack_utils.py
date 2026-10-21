@@ -14,6 +14,7 @@ Key design decisions:
     adversarial distribution shift (Paper Sec 4.7).
 """
 
+import hashlib
 import os
 import sys
 import warnings
@@ -749,21 +750,49 @@ def safe_extract_authorship(code, auth_parser_fn):
 
 
 def _attack_source_mtime(language):
-    # I fingerprint the clean .npy bundle because a re-extraction (new
-    # main.py run) is the only local event that can change raw features.
+    # Fingerprint the clean .npy bundle too: a re-extraction (new main.py
+    # run) changes the clean features that isolated suites reuse.
     try:
         return int(os.path.getmtime(f"{language}_test_X.npy"))
     except OSError:
         return 0
 
 
+def _attack_code_fingerprint():
+    """Hash the transform module *and* the entry script.
+
+    The old key was (attack name, mode, target, seed, limit, clean mtime),
+    so editing the transforms -- or changing which closures an entry point
+    runs -- silently reused features extracted by the previous code. On a
+    persistent box (the A100) the 5-seed runner and the single-attack
+    wrappers shared the same 'full-enhanced' key, so whichever ran first
+    decided what the other saw. Hashing both files makes stale reuse
+    impossible and keeps entry points from poisoning each other.
+    """
+    h = hashlib.sha1()
+    h.update(b"atkfeat-v2")
+    try:
+        with open(__file__, "rb") as fh:
+            h.update(fh.read())
+    except OSError:
+        pass
+    entry = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    try:
+        with open(entry, "rb") as fh:
+            h.update(fh.read())
+    except OSError:
+        h.update(entry.encode("utf-8", "replace"))
+    return h.hexdigest()[:10]
+
+
 def attack_feature_cache_path(language, attack_name, mode, target, base_seed,
-                              limit, cache_dir="."):
+                              limit, cache_dir=".", attack_layer="full"):
     lim = "full" if limit is None else f"lim{limit}"
     return os.path.join(
         cache_dir,
-        f"{language}_atkfeat_{attack_name}_{mode}_{target}"
-        f"_b{base_seed}_{lim}_m{_attack_source_mtime(language)}.npz")
+        f"{language}_atkfeat_{attack_name}_{mode}_{target}_l{attack_layer}"
+        f"_b{base_seed}_{lim}_m{_attack_source_mtime(language)}"
+        f"_c{_attack_code_fingerprint()}.npz")
 
 
 def save_cached_attack_features(path, feat):
@@ -972,13 +1001,15 @@ def extract_attack_features(language, attack_name, apply_attack_fn,
 
 def score_attack_features(feat, language, attack_name, mode="enhanced",
                           adversarial=False, transductive_scaler=False,
-                          t_total_start=None, rss_start=None):
+                          t_total_start=None, rss_start=None, threshold=0.50):
     """Seed-DEPENDENT half of run_attack_evaluation: scale with this seed's
     fitted scaler, run inference, and report metrics.
 
-    Prints, metrics, cost keys, and the return dict are identical to the
-    original end-to-end pipeline.
+    `threshold` is the decision cut. It defaults to 0.50 (paper Table 9
+    protocol). run_five_seeds.py can pass the CPG-style clean-validation
+    cut instead, so both models can be compared under the same policy.
     """
+    threshold = 0.50 if threshold is None else float(threshold)
     X = feat["X"]
     labels = feat["labels"]
     t_attack = feat.get("t_attack", 0.0)
@@ -1017,7 +1048,7 @@ def score_attack_features(feat, language, attack_name, mode="enhanced",
     t_inf_start = time.perf_counter()
     with torch.no_grad():
         probs = model(torch.FloatTensor(X_scaled).to(device)).cpu().numpy().flatten()
-        preds = (probs >= 0.5).astype(int)
+        preds = (probs >= threshold).astype(int)
     inf_duration = time.perf_counter() - t_inf_start
     peak_ram_mb = max(rss_start, rss_before_inf, current_rss_mb())
     n_samples = len(labels)
@@ -1042,11 +1073,12 @@ def score_attack_features(feat, language, attack_name, mode="enhanced",
     print(f"{'=' * 60}")
     print(f"  Accuracy : {acc:.4f}   F1 : {f1:.4f}   AUC : {roc:.4f}")
     print(f"  Precision: {prec:.4f}   Recall: {rec:.4f}   FPR : {fpr:.4f}")
+    print(f"  Threshold: {threshold:.4f}")
     print(f"  Confusion:  TN={tn}  FP={fp}  FN={fn}  TP={tp}")
     print()
     print(f"  Probability distribution (diagnostic):")
-    print(f"    Human   → mean={probs[hm].mean():.4f}  std={probs[hm].std():.4f}  predicted-machine={float((probs[hm] >= 0.5).mean()):.4f}")
-    print(f"    Machine → mean={probs[mm].mean():.4f}  std={probs[mm].std():.4f}  predicted-machine={float((probs[mm] >= 0.5).mean()):.4f}")
+    print(f"    Human   → mean={probs[hm].mean():.4f}  std={probs[hm].std():.4f}  predicted-machine={float((probs[hm] >= threshold).mean()):.4f}")
+    print(f"    Machine → mean={probs[mm].mean():.4f}  std={probs[mm].std():.4f}  predicted-machine={float((probs[mm] >= threshold).mean()):.4f}")
     print(f"  Cost    -> Latency: {latency_ms:.2f} ms/sample | Throughput: {throughput:.2f} samples/sec | PeakRAM: {peak_ram_mb:.2f} MB")
     print(f"  Timing  -> Attack: {t_attack:.1f}s | CodeT5+: {t_sem:.1f}s | CodeBERT: {t_stat:.1f}s | AST: {t_auth:.1f}s | Inference: {inf_duration:.2f}s | Total: {total_time:.1f}s")
     print(f"{'=' * 60}\n")
@@ -1067,7 +1099,8 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
                           attack_all_samples=False, adversarial=False,
                           attack_layer="full", mode="enhanced",
                           transductive_scaler=False, clean_cache=None,
-                          feature_cache_dir=None, rebuild_cache=False):
+                          feature_cache_dir=None, rebuild_cache=False,
+                          threshold=0.50):
     """End-to-end evaluation pipeline supporting isolated (paper Sec 4.7) and full attacks.
 
     Parameters
@@ -1087,6 +1120,7 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     feature_cache_dir  : optional directory for the extract-once .npz cache
                          (None = extract every call, exactly like before)
     rebuild_cache      : force re-extraction even when a cache file exists
+    threshold          : decision cut for accuracy/F1 (default 0.50)
     """
     # I start total-time/RAM accounting here so cached and fresh paths
     # report comparable totals.
@@ -1096,7 +1130,7 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
     if feature_cache_dir is not None:
         cache_path = attack_feature_cache_path(
             language, attack_name, mode, target, base_seed, limit,
-            feature_cache_dir)
+            feature_cache_dir, attack_layer=attack_layer)
         feat = None if rebuild_cache else load_cached_attack_features(cache_path)
         if feat is None:
             feat = extract_attack_features(
@@ -1109,4 +1143,4 @@ def run_attack_evaluation(language, attack_name, apply_attack_fn,
             base_seed, attack_all_samples, attack_layer, mode, clean_cache)
     return score_attack_features(
         feat, language, attack_name, mode, adversarial,
-        transductive_scaler, t_total_start, rss_start)
+        transductive_scaler, t_total_start, rss_start, threshold=threshold)

@@ -22,9 +22,11 @@ def current_rss_mb():
     return _psutil_proc.memory_info().rss / (1024 * 1024)
 
 
-def evaluate_model(language="python", batch_size=64, adversarial=False):
+def evaluate_model(language="python", batch_size=64, adversarial=False,
+                   threshold=0.50):
+    threshold = 0.50 if threshold is None else float(threshold)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Evaluating {language.upper()} on {device}...")
+    print(f"Evaluating {language.upper()} on {device} (threshold={threshold:.4f})...")
     
     X_test = np.load(f"{language}_test_X.npy")
     y_test = np.load(f"{language}_test_y.npy")
@@ -49,7 +51,7 @@ def evaluate_model(language="python", batch_size=64, adversarial=False):
         for batch_X, batch_y in test_loader:
             batch_X = batch_X.to(device)
             probs = model(batch_X)
-            preds = (probs >= 0.5).float()
+            preds = (probs >= threshold).float()
 
             # Squeeze guarantees flat 1D lists even if batch sizes jitter
             all_probs.extend(probs.cpu().numpy().flatten())
@@ -75,6 +77,7 @@ def evaluate_model(language="python", batch_size=64, adversarial=False):
     print("\n--- FINAL TEST METRICS ---")
     print(f"Accuracy:  {acc:.4f} | F1-Score: {f1:.4f} | ROC-AUC: {roc:.4f}")
     print(f"Precision: {prec:.4f} | Recall:   {rec:.4f} | FPR:     {fpr:.4f}")
+    print(f"Threshold: {threshold:.4f}")
     print(f"  Cost    -> Latency: {latency_ms:.2f} ms/sample | Throughput: {throughput:.2f} samples/sec | PeakRAM: {peak_ram_mb:.2f} MB")
     print(f"  Test time: {inf_duration:.2f}s over {n_samples} samples")
 
@@ -91,9 +94,12 @@ if __name__ == "__main__":
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--adversarial", action="store_true")
+    parser.add_argument("--threshold", type=float, default=0.50,
+                        help="Decision cut (use the seed's clean-val threshold for calibrated runs)")
     args = parser.parse_args()
     
     if args.batch_size is None:
         args.batch_size = 64 if args.language == "python" else (32 if args.language == "java" else 16)
             
-    evaluate_model(language=args.language, batch_size=args.batch_size, adversarial=args.adversarial)
+    evaluate_model(language=args.language, batch_size=args.batch_size,
+                   adversarial=args.adversarial, threshold=args.threshold)
