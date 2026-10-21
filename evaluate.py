@@ -23,8 +23,19 @@ def current_rss_mb():
 
 
 def evaluate_model(language="python", batch_size=64, adversarial=False,
-                   threshold=0.50):
-    threshold = 0.50 if threshold is None else float(threshold)
+                   threshold=None, threshold_mode="fixed"):
+    if threshold_mode not in ("fixed", "calibrated"):
+        raise ValueError(f"Unknown threshold_mode {threshold_mode!r}")
+    if threshold is None:
+        if threshold_mode == "calibrated":
+            # Same clean-validation rule and eval prior as the CPG checkpoint.
+            from threshold import compute_seed_threshold, test_prior
+            threshold = compute_seed_threshold(
+                language, adversarial=adversarial, fallback=0.50,
+                prior=test_prior(language))
+        else:
+            threshold = 0.50
+    threshold = float(threshold)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Evaluating {language.upper()} on {device} (threshold={threshold:.4f})...")
     
@@ -94,12 +105,17 @@ if __name__ == "__main__":
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--adversarial", action="store_true")
-    parser.add_argument("--threshold", type=float, default=0.50,
-                        help="Decision cut (use the seed's clean-val threshold for calibrated runs)")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Optional explicit cut; overrides --threshold-mode")
+    parser.add_argument("--threshold-mode", type=str, default="fixed",
+                        choices=["fixed", "calibrated"],
+                        help="'fixed' (default) uses 0.50; 'calibrated' applies the "
+                             "CPG clean-validation rule to this checkpoint")
     args = parser.parse_args()
     
     if args.batch_size is None:
         args.batch_size = 64 if args.language == "python" else (32 if args.language == "java" else 16)
             
     evaluate_model(language=args.language, batch_size=args.batch_size,
-                   adversarial=args.adversarial, threshold=args.threshold)
+                   adversarial=args.adversarial, threshold=args.threshold,
+                   threshold_mode=args.threshold_mode)

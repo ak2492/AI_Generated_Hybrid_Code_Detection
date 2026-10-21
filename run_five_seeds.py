@@ -52,8 +52,8 @@ from train import train_model
 LANGUAGES = ["python", "java", "cpp"]
 METRIC_COLS = ["Acc", "Prec", "Rec", "F1", "ROC", "FPR",
                "Latency_ms", "Throughput", "PeakRAM_MB", "N"]
-COLUMNS = (["Language", "Variant", "Seed", "Scenario", "Threshold", "TrainValF1"]
-           + METRIC_COLS)
+COLUMNS = (["Language", "Variant", "Seed", "Scenario", "Threshold", "ThresholdMode",
+            "TrainValF1"] + METRIC_COLS)
 
 
 def parse_seeds(spec):
@@ -92,8 +92,9 @@ def _attack_suites(language, base_seed, target, force_full=False):
 
     `force_full=True` recomputes every feature block for every transform,
     which is what the CPG model necessarily does (it has no 813-d feature
-    groups to isolate). Use it for the cross-model comparison; keep the
-    default for the paper-style isolated Table 9 reproduction.
+    groups to isolate). It is the runner default because the CPG/hybrid
+    comparison must use the same whole-model attacked inputs; pass
+    --attack-eval isolated for the paper Table 9 reproduction.
     """
     config = get_language_config(language)
     ts_parser = get_ts_parser(config["lang_obj"])
@@ -171,7 +172,7 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                  learning_rate=1e-5, threshold=0.50, base_seed=42, target="machine",
                  skip_external=False, out_csv=None, resume=False,
                  feature_cache_dir=".", rebuild_cache=False,
-                 threshold_mode="fixed", attack_eval="isolated"):
+                 threshold_mode="fixed", attack_eval="full"):
     variant = "adv" if adversarial else "clean"
     tag = "ADV" if adversarial else "CLEAN"
     if threshold_mode not in ("fixed", "calibrated"):
@@ -185,11 +186,18 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
     (ckpt_canon, ckpt_tpl), (scaler_canon, scaler_tpl) = _artifact_names(language, adversarial)
     rows = []
     prev_all = None
+    prev_meta = None
     if out_csv and resume and os.path.exists(out_csv):
         prev_all = pd.read_csv(out_csv)
         prev = prev_all[(prev_all["Language"] != language) | (prev_all["Variant"] != variant)]
         rows.extend(prev.to_dict("records"))
         print(f"[resume] kept {len(prev)} existing rows for other configs.")
+    elif out_csv and resume and threshold_mode == "calibrated":
+        # First calibrated pass: reuse the fixed table's TrainValF1 metadata
+        # without copying its fixed-threshold rows into the calibrated table.
+        fixed_csv = out_csv.replace("_calibrated", "")
+        if os.path.exists(fixed_csv):
+            prev_meta = pd.read_csv(fixed_csv)
 
     for seed in seeds:
         # I start each seed from a clean memory state because 5 seeds of
@@ -207,10 +215,11 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
         if resume and os.path.exists(seed_ckpt) and os.path.exists(seed_scaler):
             print(f"[resume] reusing {seed_ckpt} + {seed_scaler}, skipping training.")
             best_f1 = float("nan")
-            if prev_all is not None:
-                hit = prev_all[(prev_all["Language"] == language)
-                               & (prev_all["Variant"] == variant)
-                               & (prev_all["Seed"] == seed)]
+            meta = prev_all if prev_all is not None else prev_meta
+            if meta is not None:
+                hit = meta[(meta["Language"] == language)
+                           & (meta["Variant"] == variant)
+                           & (meta["Seed"] == seed)]
                 if len(hit):
                     best_f1 = float(hit["TrainValF1"].iloc[0])
         else:
@@ -237,7 +246,7 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
             rows.append({
                 "Language": language, "Variant": variant, "Seed": seed,
                 "Scenario": scenario, "Threshold": seed_threshold,
-                "TrainValF1": best_f1,
+                "ThresholdMode": threshold_mode, "TrainValF1": best_f1,
                 "Acc": res["Acc"], "Prec": res["Prec"], "Rec": res["Rec"],
                 "F1": res["F1"], "ROC": res["ROC"], "FPR": res["FPR"],
                 "Latency_ms": res["Latency_ms"], "Throughput": res["Throughput"],
@@ -363,11 +372,12 @@ if __name__ == "__main__":
                         choices=["fixed", "calibrated"],
                         help="'fixed' = paper Table 9 protocol at --threshold; "
                              "'calibrated' = CPG clean-val rule, same for every attack")
-    parser.add_argument("--attack-eval", type=str, default="isolated",
+    parser.add_argument("--attack-eval", type=str, default="full",
                         choices=["isolated", "full"],
-                        help="'isolated' = paper-style feature-block isolation; "
-                             "'full' = recompute every block under each transform, "
-                             "matching the CPG model's whole-model evaluation")
+                        help="'full' (default) = recompute every block under each "
+                             "transform, matching the CPG model's whole-model "
+                             "evaluation; 'isolated' = paper Table 9 feature-block "
+                             "isolation")
     parser.add_argument("--base_seed", type=int, default=42,
                         help="Fixed attack-sampling seed (keep 42 so attacked sets match across training seeds)")
     parser.add_argument("--target", type=str, default="machine", choices=["machine", "all"])
