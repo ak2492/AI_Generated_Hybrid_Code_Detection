@@ -750,12 +750,46 @@ def safe_extract_authorship(code, auth_parser_fn):
 
 
 def _attack_source_mtime(language):
-    # Fingerprint the clean .npy bundle too: a re-extraction (new main.py
-    # run) changes the clean features that isolated suites reuse.
+    """Legacy cache key only; retained so old .npz files stay discoverable."""
     try:
         return int(os.path.getmtime(f"{language}_test_X.npy"))
     except OSError:
         return 0
+
+
+_ATTACK_SOURCE_DIGEST_CACHE = {}
+_LEGACY_FEATURE_CACHE_ALIASES = {}
+
+
+def _attack_source_fingerprint(language):
+    """Content hash of the clean test bundle, stable across clone/move/copy.
+
+    The old key used the .npy mtime, so copying preprocessed features into a
+    fresh clone invalidated every cached attack extraction. Hashing content
+    keeps the cache tied to the actual test rows.
+    """
+    digest = hashlib.sha256()
+    missing = False
+    for name in (f"{language}_test_X.npy", f"{language}_test_y.npy"):
+        try:
+            stat = os.stat(name)
+        except OSError:
+            missing = True
+            break
+        key = (os.path.abspath(name), stat.st_size, stat.st_mtime_ns)
+        cached = _ATTACK_SOURCE_DIGEST_CACHE.get(key)
+        if cached is None:
+            h = hashlib.sha256()
+            try:
+                with open(name, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(4 * 1024 * 1024), b""):
+                        h.update(chunk)
+                cached = h.hexdigest()[:16]
+            except OSError:
+                cached = "missing"
+            _ATTACK_SOURCE_DIGEST_CACHE[key] = cached
+        digest.update(cached.encode("ascii", "replace"))
+    return "missing" if missing else digest.hexdigest()[:16]
 
 
 def _attack_code_fingerprint():
@@ -788,11 +822,20 @@ def _attack_code_fingerprint():
 def attack_feature_cache_path(language, attack_name, mode, target, base_seed,
                               limit, cache_dir=".", attack_layer="full"):
     lim = "full" if limit is None else f"lim{limit}"
-    return os.path.join(
+    stem = (f"{language}_atkfeat_{attack_name}_{mode}_{target}_l{attack_layer}"
+            f"_b{base_seed}_{lim}")
+    code_hash = _attack_code_fingerprint()
+    new_path = os.path.join(
         cache_dir,
-        f"{language}_atkfeat_{attack_name}_{mode}_{target}_l{attack_layer}"
-        f"_b{base_seed}_{lim}_m{_attack_source_mtime(language)}"
-        f"_c{_attack_code_fingerprint()}.npz")
+        f"{stem}_h{_attack_source_fingerprint(language)}"
+        f"_c{code_hash}.npz")
+    legacy_path = os.path.join(
+        cache_dir,
+        f"{stem}_m{_attack_source_mtime(language)}"
+        f"_c{code_hash}.npz")
+    if os.path.exists(legacy_path):
+        _LEGACY_FEATURE_CACHE_ALIASES[new_path] = legacy_path
+    return new_path
 
 
 def save_cached_attack_features(path, feat):
@@ -802,9 +845,22 @@ def save_cached_attack_features(path, feat):
 
 
 def load_cached_attack_features(path):
-    try:
-        z = np.load(path, allow_pickle=False)
-    except (OSError, ValueError):
+    candidates = [path]
+    legacy = _LEGACY_FEATURE_CACHE_ALIASES.get(path)
+    if legacy and legacy != path and os.path.exists(legacy):
+        candidates.append(legacy)
+    z = None
+    loaded_from = path
+    for candidate in candidates:
+        try:
+            z = np.load(candidate, allow_pickle=False)
+            loaded_from = candidate
+            break
+        except Exception:
+            # A cache is optional; a half-written or foreign file must fall
+            # back to re-extraction instead of aborting a benchmark.
+            z = None
+    if z is None:
         return None
     try:
         sem, stat, auth, labels = z["sem"], z["stat"], z["auth"], z["labels"]
@@ -820,7 +876,10 @@ def load_cached_attack_features(path):
         return None
     if not (sem.shape[0] == stat.shape[0] == auth.shape[0] == labels.shape[0]):
         return None
-    print(f"  Loaded cached attack features from {path} (no re-extraction)")
+    if loaded_from != path:
+        print(f"  [cache] reusing legacy content cache {loaded_from} "
+              f"(new content-keyed path {path} not built yet)")
+    print(f"  Loaded cached attack features from {loaded_from} (no re-extraction)")
     return {"sem_feature": sem, "stat_feature": stat, "auth_feature": auth,
             "labels": labels, "X": np.hstack((sem, stat, auth)),
             "t_attack": 0.0, "t_sem": 0.0, "t_stat": 0.0, "t_auth": 0.0}
