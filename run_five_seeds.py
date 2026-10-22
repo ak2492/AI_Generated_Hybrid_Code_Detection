@@ -368,7 +368,9 @@ def _report_caches(language, cache_dir, rebuild=False):
 
 
 def _existing_keys(df, language, variant):
-    if df is None or not len(df) or "Checkpoint" not in df.columns:
+    required = {"Language", "Variant", "Seed", "Checkpoint",
+                "ThresholdMode", "EvalConfig"}
+    if df is None or not len(df) or not required.issubset(df.columns):
         return set()
     cur = df[(df["Language"] == language) & (df["Variant"] == variant)]
     keys = set()
@@ -376,7 +378,7 @@ def _existing_keys(df, language, variant):
         try:
             keys.add((int(row["Seed"]), str(row["Checkpoint"]),
                       str(row["ThresholdMode"]), str(row["EvalConfig"])))
-        except (TypeError, ValueError):
+        except (KeyError, TypeError, ValueError):
             continue
     return keys
 
