@@ -47,7 +47,7 @@ from attack_utils import (
 from evaluate import evaluate_model
 from external_eval import run_external
 from threshold import compute_seed_threshold, test_prior
-from train import train_model
+from train import train_model, ensure_data
 
 LANGUAGES = ["python", "java", "cpp"]
 METRIC_COLS = ["Acc", "Prec", "Rec", "F1", "ROC", "FPR",
@@ -169,10 +169,11 @@ def _attack_suites(language, base_seed, target, force_full=False):
 
 
 def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None,
-                 learning_rate=1e-5, threshold=0.50, base_seed=42, target="machine",
+                 learning_rate=1e-5, threshold=None, base_seed=42, target="machine",
                  skip_external=False, out_csv=None, resume=False,
                  feature_cache_dir=".", rebuild_cache=False,
-                 threshold_mode="fixed", attack_eval="full"):
+                 threshold_mode="calibrated", attack_eval="full", rebuild_data=False):
+    ensure_data(language, adversarial=adversarial, rebuild=rebuild_data)
     variant = "adv" if adversarial else "clean"
     tag = "ADV" if adversarial else "CLEAN"
     if threshold_mode not in ("fixed", "calibrated"):
@@ -229,6 +230,8 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                                   adversarial=adversarial, seed=seed)
             shutil.copyfile(ckpt_canon, seed_ckpt)
             shutil.copyfile(scaler_canon, seed_scaler)
+            if os.path.exists(f"{ckpt_canon}.json"):
+                shutil.copyfile(f"{ckpt_canon}.json", f"{seed_ckpt}.json")
             print(f"Artifacts archived -> {seed_ckpt}, {seed_scaler}")
         gc.collect()
         if torch.cuda.is_available():
@@ -239,6 +242,8 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
             # eval CLIs load the canonical filenames.
             shutil.copyfile(seed_ckpt, ckpt_canon)
             shutil.copyfile(seed_scaler, scaler_canon)
+            if os.path.exists(f"{seed_ckpt}.json"):
+                shutil.copyfile(f"{seed_ckpt}.json", f"{ckpt_canon}.json")
 
         def _row(scenario, res):
             if res is None:
@@ -254,17 +259,26 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
             })
 
         _restore()
-        if threshold_mode == "calibrated":
-            # Same rule as the CPG checkpoint threshold: clean validation,
-            # F1-argmax reweighted to the eval prior, cross-validated, and
-            # only kept when it beats the fixed cut. No attack data is used.
+        if threshold is not None:
+            seed_threshold = float(threshold)
+            print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} (forced via --threshold)")
+        elif os.path.exists(f"{seed_ckpt}.json"):
+            try:
+                with open(f"{seed_ckpt}.json", "r", encoding="utf-8") as fh:
+                    seed_threshold = float(json.load(fh).get("optimal_threshold", 0.50))
+                print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} (from checkpoint json)")
+            except Exception:
+                seed_threshold = compute_seed_threshold(
+                    language, adversarial=adversarial, fallback=0.50, prior=eval_prior)
+                print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} (clean-val calibrated)")
+        elif threshold_mode == "calibrated":
             seed_threshold = compute_seed_threshold(
-                language, adversarial=adversarial, fallback=threshold,
+                language, adversarial=adversarial, fallback=0.50,
                 prior=eval_prior)
             print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} "
                   f"(clean-val calibrated; eval prior {eval_prior:.4f})")
         else:
-            seed_threshold = float(threshold)
+            seed_threshold = 0.50
             print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} (fixed)")
         thresholds[str(seed)] = seed_threshold
 
@@ -328,7 +342,7 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
         with open(thr_path, "w", encoding="utf-8") as fh:
             json.dump({"language": language, "variant": variant,
                        "threshold_mode": threshold_mode,
-                       "fallback": float(threshold),
+                       "fallback": float(threshold) if threshold is not None else None,
                        "eval_prior": eval_prior,
                        "thresholds": thresholds}, fh, indent=2)
         print(f"[i] Wrote per-seed thresholds -> {thr_path}")
@@ -366,12 +380,13 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
-    parser.add_argument("--threshold", type=float, default=0.50,
-                        help="Fixed decision cut (also the fallback for calibrated mode)")
-    parser.add_argument("--threshold-mode", type=str, default="fixed",
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Decision cut (default: checkpoint-optimal threshold from training)")
+    parser.add_argument("--threshold-mode", type=str, default="calibrated",
                         choices=["fixed", "calibrated"],
-                        help="'fixed' = paper Table 9 protocol at --threshold; "
-                             "'calibrated' = CPG clean-val rule, same for every attack")
+                        help="'calibrated' (default) = validation-optimal cut; 'fixed' = 0.50")
+    parser.add_argument("--rebuild-data", action="store_true",
+                        help="Force re-extracting .npy feature files via main.py")
     parser.add_argument("--attack-eval", type=str, default="full",
                         choices=["isolated", "full"],
                         help="'full' (default) = recompute every block under each "
@@ -408,10 +423,8 @@ if __name__ == "__main__":
     feature_cache_dir = None if args.no_feature_cache else args.cache_dir
     # Never overwrite the paper-faithful fixed-0.50 table with the
     # calibrated secondary table.
-    thr_suffix = "" if args.threshold_mode == "fixed" else "_calibrated"
-    atk_suffix = "" if args.attack_eval == "isolated" else "_fullmodel"
     for lang in langs:
-        out_csv = f"five_seed_{lang}_{variant}{thr_suffix}{atk_suffix}.csv"
+        out_csv = f"five_seed_{lang}_{variant}.csv"
         df_all = run_language(lang, seeds, adversarial=args.adversarial,
                               epochs=args.epochs, batch_size=args.batch_size,
                               learning_rate=args.learning_rate,
@@ -422,11 +435,10 @@ if __name__ == "__main__":
                               feature_cache_dir=feature_cache_dir,
                               rebuild_cache=args.rebuild_cache,
                               threshold_mode=args.threshold_mode,
-                              attack_eval=args.attack_eval)
+                              attack_eval=args.attack_eval,
+                              rebuild_data=args.rebuild_data)
         summary = summarize(df_all[df_all["Language"] == lang])
-        summary.to_csv(
-            f"five_seed_{lang}_{variant}{thr_suffix}{atk_suffix}_summary.csv",
-            index=False)
+        summary.to_csv(f"five_seed_{lang}_{variant}_summary.csv", index=False)
 
         if args.upload:
             # I require an explicit repo and never default to a personal

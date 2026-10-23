@@ -188,6 +188,13 @@ def _evaluate_external_cached(samples, language, sem_extractor, stat_extractor,
                               cache_path=None, rebuild_cache=False):
     if cache_path is not None:
         feat = None if rebuild_cache else load_cached_external_features(cache_path)
+        # I reject a cache whose row count does not match the current sample
+        # list because a suite whose sampling changed (for example a corrected
+        # SemEval-B label map) must never be scored from stale features.
+        if feat is not None and feat["X"].shape[0] != len(samples):
+            print(f"  [!] cached features hold {feat['X'].shape[0]} rows but "
+                  f"{len(samples)} samples were sampled; re-extracting.")
+            feat = None
         if feat is None:
             feat = extract_external_features(samples, language, sem_extractor,
                                              stat_extractor)

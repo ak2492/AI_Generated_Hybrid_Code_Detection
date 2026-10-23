@@ -23,18 +23,22 @@ def current_rss_mb():
 
 
 def evaluate_model(language="python", batch_size=64, adversarial=False,
-                   threshold=None, threshold_mode="fixed"):
-    if threshold_mode not in ("fixed", "calibrated"):
-        raise ValueError(f"Unknown threshold_mode {threshold_mode!r}")
+                   threshold=None, threshold_mode="calibrated"):
+    model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
     if threshold is None:
-        if threshold_mode == "calibrated":
-            # Same clean-validation rule and eval prior as the CPG checkpoint.
+        meta_file = f"{model_file}.json"
+        if os.path.exists(meta_file):
+            import json
+            try:
+                with open(meta_file, "r", encoding="utf-8") as fh:
+                    threshold = float(json.load(fh).get("optimal_threshold", 0.50))
+            except Exception:
+                threshold = None
+        if threshold is None:
             from threshold import compute_seed_threshold, test_prior
             threshold = compute_seed_threshold(
                 language, adversarial=adversarial, fallback=0.50,
                 prior=test_prior(language))
-        else:
-            threshold = 0.50
     threshold = float(threshold)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Evaluating {language.upper()} on {device} (threshold={threshold:.4f})...")
@@ -48,7 +52,6 @@ def evaluate_model(language="python", batch_size=64, adversarial=False,
     
     model = HybridCodeDetector().to(device)
     # Fixed map_location for cross-hardware evaluation
-    model_file = f"{language}_adv_best_model.pt" if adversarial else f"{language}_best_model.pt"
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
     
@@ -107,10 +110,10 @@ if __name__ == "__main__":
     parser.add_argument("--adversarial", action="store_true")
     parser.add_argument("--threshold", type=float, default=None,
                         help="Optional explicit cut; overrides --threshold-mode")
-    parser.add_argument("--threshold-mode", type=str, default="fixed",
+    parser.add_argument("--threshold-mode", type=str, default="calibrated",
                         choices=["fixed", "calibrated"],
-                        help="'fixed' (default) uses 0.50; 'calibrated' applies the "
-                             "CPG clean-validation rule to this checkpoint")
+                        help="'calibrated' (default) uses the optimal threshold stored in the "
+                             "model sidecar json; 'fixed' forces 0.50")
     args = parser.parse_args()
     
     if args.batch_size is None:

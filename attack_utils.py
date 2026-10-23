@@ -758,72 +758,66 @@ def _attack_source_mtime(language):
         return 0
 
 
-def _attack_code_fingerprint():
-    """Hash the transform module *and* the entry script.
-
-    The old key was (attack name, mode, target, seed, limit, clean mtime),
-    so editing the transforms -- or changing which closures an entry point
-    runs -- silently reused features extracted by the previous code. On a
-    persistent box (the A100) the 5-seed runner and the single-attack
-    wrappers shared the same 'full-enhanced' key, so whichever ran first
-    decided what the other saw. Hashing both files makes stale reuse
-    impossible and keeps entry points from poisoning each other.
-    """
-    h = hashlib.sha1()
-    h.update(b"atkfeat-v2")
-    try:
-        with open(__file__, "rb") as fh:
-            h.update(fh.read())
-    except OSError:
-        pass
-    entry = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
-    try:
-        with open(entry, "rb") as fh:
-            h.update(fh.read())
-    except OSError:
-        h.update(entry.encode("utf-8", "replace"))
-    return h.hexdigest()[:10]
-
-
 def attack_feature_cache_path(language, attack_name, mode, target, base_seed,
                               limit, cache_dir=".", attack_layer="full"):
     lim = "full" if limit is None else f"lim{limit}"
-    return os.path.join(
-        cache_dir,
-        f"{language}_atkfeat_{attack_name}_{mode}_{target}_l{attack_layer}"
-        f"_b{base_seed}_{lim}_m{_attack_source_mtime(language)}"
-        f"_c{_attack_code_fingerprint()}.npz")
+    stem = f"{language}_atkfeat_{attack_name}_{mode}_{target}_l{attack_layer}_b{base_seed}_{lim}"
+    return os.path.join(cache_dir, f"{stem}.npz")
 
 
 def save_cached_attack_features(path, feat):
+    dir_name = os.path.dirname(path) or "."
+    base_name = os.path.basename(path)
+    import re
+    stem = re.sub(r'_(m\d+|h[0-9a-f]{6,}).*$', '', base_name.split(".npz")[0])
+    import glob
+    existing = glob.glob(os.path.join(dir_name, f"{stem}*.npz"))
+    if existing:
+        print(f"  [cache] already exists at {existing[0]}; skipping save.")
+        return
     np.savez_compressed(path, sem=feat["sem_feature"], stat=feat["stat_feature"],
                         auth=feat["auth_feature"], labels=feat["labels"])
     print(f"  Cached attack features -> {path} (later seeds skip extraction)")
 
 
 def load_cached_attack_features(path):
-    try:
-        z = np.load(path, allow_pickle=False)
-    except (OSError, ValueError):
-        return None
-    try:
-        sem, stat, auth, labels = z["sem"], z["stat"], z["auth"], z["labels"]
-    except KeyError:
-        return None
-    # I validate shapes here because a half-written or foreign .npz must
-    # never silently poison a seed run; any mismatch forces re-extraction.
-    if sem.ndim != 2 or sem.shape[1] != 768:
-        return None
-    if stat.ndim != 2 or stat.shape[1] != 7:
-        return None
-    if auth.ndim != 2 or auth.shape[1] != 38:
-        return None
-    if not (sem.shape[0] == stat.shape[0] == auth.shape[0] == labels.shape[0]):
-        return None
-    print(f"  Loaded cached attack features from {path} (no re-extraction)")
-    return {"sem_feature": sem, "stat_feature": stat, "auth_feature": auth,
-            "labels": labels, "X": np.hstack((sem, stat, auth)),
-            "t_attack": 0.0, "t_sem": 0.0, "t_stat": 0.0, "t_auth": 0.0}
+    candidates = []
+    if os.path.exists(path):
+        candidates.append(path)
+
+    dir_name = os.path.dirname(path) or "."
+    base_name = os.path.basename(path)
+    import re
+    stem = re.sub(r'_(m\d+|h[0-9a-f]{6,}).*$', '', base_name.split(".npz")[0])
+    import glob
+    for match in glob.glob(os.path.join(dir_name, f"{stem}*.npz")):
+        if match not in candidates:
+            candidates.append(match)
+
+    for candidate in candidates:
+        try:
+            z = np.load(candidate, allow_pickle=False)
+        except (OSError, ValueError):
+            continue
+        try:
+            sem, stat, auth, labels = z["sem"], z["stat"], z["auth"], z["labels"]
+        except KeyError:
+            continue
+        # I validate shapes here because a half-written or foreign .npz must
+        # never silently poison a seed run; any mismatch forces re-extraction.
+        if sem.ndim != 2 or sem.shape[1] != 768:
+            continue
+        if stat.ndim != 2 or stat.shape[1] != 7:
+            continue
+        if auth.ndim != 2 or auth.shape[1] != 38:
+            continue
+        if not (sem.shape[0] == stat.shape[0] == auth.shape[0] == labels.shape[0]):
+            continue
+        print(f"  Loaded cached attack features from {candidate} (no re-extraction)")
+        return {"sem_feature": sem, "stat_feature": stat, "auth_feature": auth,
+                "labels": labels, "X": np.hstack((sem, stat, auth)),
+                "t_attack": 0.0, "t_sem": 0.0, "t_stat": 0.0, "t_auth": 0.0}
+    return None
 
 
 # =========================================================================
