@@ -39,6 +39,7 @@ from attack_utils import (MAX_CODE_SIZE_TRANSFORMER, current_rss_mb,
 from model import HybridCodeDetector
 from semantic_extractor import SemanticExtractor
 from statistical_extractor import StatisticalExtractor
+from token_metrics import count_tokens_batch
 
 MAX_SEMEVAL_PER_CLASS = 3000  # I match CPG MAX_SEMEVAL_SAMPLES_PER_CLASS.
 EXT_SEED = 42  # I use 42 here like CPG external_eval so both folders sample identical external rows.
@@ -72,10 +73,12 @@ def extract_external_features(samples, language, sem_extractor, stat_extractor):
     auth_parser = get_auth_parser(language)
     all_auth = np.array([safe_extract_authorship(c, auth_parser)
                          for c in tqdm(codes, desc="AST (external)", leave=True)])
+    token_counts = np.asarray(count_tokens_batch(codes, language), dtype=np.int64)
     X = np.hstack((np.vstack(all_sem), np.vstack(all_stat), all_auth))
     print(f"  External feature matrix assembled: {X.shape}")
+    print(f"  External source tokens: {int(token_counts.sum())}")
 
-    return {"X": X, "labels": labels}
+    return {"X": X, "labels": labels, "tokens": token_counts}
 
 
 def score_external_features(feat, language, batch_size, threshold, adversarial, tag):
@@ -85,6 +88,8 @@ def score_external_features(feat, language, batch_size, threshold, adversarial, 
     """
     X = feat["X"]
     labels = feat["labels"]
+    token_counts = feat.get("tokens")
+    n_tokens = int(np.asarray(token_counts).sum()) if token_counts is not None else 0
 
     scaler_file = f"{language}_adv_scaler.pkl" if adversarial else f"{language}_scaler.pkl"
     if not os.path.exists(scaler_file):
@@ -107,6 +112,8 @@ def score_external_features(feat, language, batch_size, threshold, adversarial, 
 
     all_preds, all_targets, all_probs = [], [], []
     rss_before = current_rss_mb()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t_start = time.perf_counter()
     with torch.no_grad():
         for batch_X, batch_y in loader:
@@ -116,11 +123,15 @@ def score_external_features(feat, language, batch_size, threshold, adversarial, 
             all_probs.extend(probs.cpu().numpy().flatten())
             all_preds.extend(preds.cpu().numpy().flatten())
             all_targets.extend(batch_y.numpy().flatten())
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     inf_duration = time.perf_counter() - t_start
     peak_ram_mb = max(rss_before, current_rss_mb())
     n = len(all_targets)
     latency_ms = (inf_duration / n) * 1000.0 if n else 0.0
-    throughput = n / max(1e-6, inf_duration)
+    files_per_sec = n / max(1e-6, inf_duration)
+    tokens_per_sec = n_tokens / max(1e-6, inf_duration)
+    ms_per_token = (inf_duration / n_tokens) * 1000.0 if n_tokens else 0.0
 
     acc = accuracy_score(all_targets, all_preds)
     f1 = f1_score(all_targets, all_preds, zero_division=0)
@@ -134,7 +145,7 @@ def score_external_features(feat, language, batch_size, threshold, adversarial, 
     print(f"Accuracy:  {acc:.4f} | F1-Score: {f1:.4f} | ROC-AUC: {roc:.4f}")
     print(f"Precision: {prec:.4f} | Recall:   {rec:.4f} | FPR:     {fpr:.4f}")
     print(f"Confusion Matrix -> TN: {tn} | FP: {fp} | FN: {fn} | TP: {tp}")
-    print(f"  Cost    -> Latency: {latency_ms:.2f} ms/sample | Throughput: {throughput:.2f} samples/sec | PeakRAM: {peak_ram_mb:.2f} MB")
+    print(f"  Cost    -> Latency: {latency_ms:.2f} ms/file | Throughput: {tokens_per_sec:.2f} tokens/sec | Files: {files_per_sec:.2f}/sec | Tokens: {n_tokens} | PeakRAM: {peak_ram_mb:.2f} MB")
 
     del loader
     gc.collect()
@@ -142,8 +153,9 @@ def score_external_features(feat, language, batch_size, threshold, adversarial, 
         torch.cuda.empty_cache()
     return {"Acc": acc, "Prec": prec, "Rec": rec, "F1": f1, "ROC": roc,
             "FPR": fpr, "TN": tn, "FP": fp, "FN": fn, "TP": tp, "N": n,
-            "Latency_ms": latency_ms, "Throughput": throughput,
-            "PeakRAM_MB": peak_ram_mb}
+            "Tokens": n_tokens, "Latency_ms": latency_ms,
+            "Throughput": tokens_per_sec, "FilesPerSec": files_per_sec,
+            "MsPerToken": ms_per_token, "PeakRAM_MB": peak_ram_mb}
 
 
 def _evaluate_external(samples, language, sem_extractor, stat_extractor,
@@ -162,7 +174,9 @@ def external_feature_cache_path(language, suite, base_seed=42, cache_dir="."):
 
 
 def save_cached_external_features(path, feat):
-    np.savez_compressed(path, X=feat["X"], labels=feat["labels"])
+    np.savez_compressed(path, X=feat["X"], labels=feat["labels"],
+                        tokens=feat.get("tokens",
+                                        np.zeros(len(feat["labels"]), dtype=np.int64)))
     print(f"  Cached external features -> {path} (later seeds skip extraction)")
 
 
@@ -173,14 +187,17 @@ def load_cached_external_features(path):
         return None
     try:
         X, labels = z["X"], z["labels"]
+        tokens = z["tokens"] if "tokens" in z else None
     except KeyError:
         return None
     # I validate shapes here because a half-written or foreign .npz must
     # never silently poison a seed run; any mismatch forces re-extraction.
     if X.ndim != 2 or X.shape[1] != 813 or X.shape[0] != labels.shape[0]:
         return None
+    if tokens is not None and tokens.shape[0] != labels.shape[0]:
+        tokens = None
     print(f"  Loaded cached external features from {path} (no re-extraction)")
-    return {"X": X, "labels": labels}
+    return {"X": X, "labels": labels, "tokens": tokens}
 
 
 def _evaluate_external_cached(samples, language, sem_extractor, stat_extractor,
@@ -198,6 +215,13 @@ def _evaluate_external_cached(samples, language, sem_extractor, stat_extractor,
         if feat is None:
             feat = extract_external_features(samples, language, sem_extractor,
                                              stat_extractor)
+            save_cached_external_features(cache_path, feat)
+        elif feat.get("tokens") is None:
+            # Cache predates token accounting: the sampled codes are still in
+            # memory, so count tokens instead of re-running the extractors.
+            feat["tokens"] = np.asarray(
+                count_tokens_batch([s["code"] for s in samples], language),
+                dtype=np.int64)
             save_cached_external_features(cache_path, feat)
         return score_external_features(feat, language, batch_size, threshold,
                                        adversarial, tag)

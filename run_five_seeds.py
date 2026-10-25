@@ -26,6 +26,7 @@ import random
 import shutil
 import subprocess
 import sys
+import time
 
 import pandas as pd
 import torch
@@ -49,9 +50,11 @@ from external_eval import run_external
 from threshold import compute_seed_threshold, test_prior
 from train import train_model, ensure_data
 
+MODEL_NAME = "hybrid"
 LANGUAGES = ["python", "java", "cpp"]
 METRIC_COLS = ["Acc", "Prec", "Rec", "F1", "ROC", "FPR",
-               "Latency_ms", "Throughput", "PeakRAM_MB", "N"]
+               "Tokens", "Latency_ms", "Throughput", "FilesPerSec",
+               "MsPerToken", "PeakRAM_MB", "N"]
 COLUMNS = (["Language", "Variant", "Seed", "Scenario", "Threshold", "ThresholdMode",
             "TrainValF1"] + METRIC_COLS)
 
@@ -168,12 +171,93 @@ def _attack_suites(language, base_seed, target, force_full=False):
     return suites
 
 
+def _write_timing(out_csv, language, variant, seeds, df, total_wall_s,
+                  training_s, eval_s, data_s, clean_eval_s,
+                  attack_eval_s, external_eval_s):
+    """Persist run-level deployment accounting next to the metrics CSV.
+
+    `non_train_s` follows the requested all-tests formula: total wall time
+    (preprocessing + every clean/attack/external evaluation + model loading)
+    minus training time, divided by every file/token that was scored.
+    """
+    if not out_csv:
+        return None
+    n = pd.to_numeric(df.get("N", pd.Series(dtype=float)), errors="coerce").fillna(0)
+    tokens = pd.to_numeric(df.get("Tokens", pd.Series(dtype=float)),
+                           errors="coerce").fillna(0)
+    total_file_evals = int(n.sum())
+    total_tokens = int(tokens.sum())
+    non_train_s = max(0.0, float(total_wall_s) - float(training_s))
+
+    clean = df[df["Scenario"] == "Clean Test"] if "Scenario" in df else df.iloc[0:0]
+    clean_n = int(pd.to_numeric(clean.get("N", pd.Series(dtype=float)),
+                                errors="coerce").fillna(0).sum())
+    clean_tokens = int(pd.to_numeric(clean.get("Tokens", pd.Series(dtype=float)),
+                                     errors="coerce").fillna(0).sum())
+    unique_test_files = int(pd.to_numeric(clean.get("N", pd.Series(dtype=float)),
+                                          errors="coerce").dropna().iloc[-1]) \
+        if len(clean) and clean["N"].notna().any() else 0
+
+    payload = {
+        "model": MODEL_NAME,
+        "language": language,
+        "variant": variant,
+        "seeds": list(seeds),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "total_wall_s": round(float(total_wall_s), 6),
+        "preprocessing_s": round(float(data_s), 6),
+        "training_s": round(float(training_s), 6),
+        "eval_s": round(float(eval_s), 6),
+        "clean_eval_s": round(float(clean_eval_s), 6),
+        "attack_eval_s": round(float(attack_eval_s), 6),
+        "external_eval_s": round(float(external_eval_s), 6),
+        "non_train_s": round(non_train_s, 6),
+        "unique_test_files": unique_test_files,
+        "total_file_evaluations": total_file_evals,
+        "total_tokens": total_tokens,
+        "amortized_ms_per_file": round(1000.0 * non_train_s / total_file_evals, 6)
+        if total_file_evals else None,
+        "amortized_ms_per_token": round(1000.0 * non_train_s / total_tokens, 6)
+        if total_tokens else None,
+        "clean_test": {
+            "file_evaluations": clean_n,
+            "tokens": clean_tokens,
+            "eval_s": round(float(clean_eval_s), 6),
+            "ms_per_file": round(1000.0 * float(clean_eval_s) / clean_n, 6)
+            if clean_n else None,
+            "ms_per_token": round(1000.0 * float(clean_eval_s) / clean_tokens, 6)
+            if clean_tokens else None,
+            "files_per_sec": round(clean_n / float(clean_eval_s), 6)
+            if clean_eval_s > 0 else None,
+            "tokens_per_sec": round(clean_tokens / float(clean_eval_s), 6)
+            if clean_eval_s > 0 else None,
+        },
+        "note": ("Clean Test rows score precomputed 813-d features; raw-code "
+                 "end-to-end deployment numbers come from deployment_benchmark.py."),
+    }
+    path = os.path.splitext(out_csv)[0] + "_timing.json"
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    print(f"[i] Wrote run-level deployment timing -> {path}")
+    return path
+
+
 def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None,
                  learning_rate=1e-5, threshold=None, base_seed=42, target="machine",
                  skip_external=False, out_csv=None, resume=False,
                  feature_cache_dir=".", rebuild_cache=False,
                  threshold_mode="calibrated", attack_eval="full", rebuild_data=False):
+    t_run_start = time.perf_counter()
+    data_s = training_s = eval_s = 0.0
+    clean_eval_s = attack_eval_s = external_eval_s = 0.0
+
+    t_phase = time.perf_counter()
     ensure_data(language, adversarial=adversarial, rebuild=rebuild_data)
+    data_s += time.perf_counter() - t_phase
+    if rebuild_data:
+        # A data rebuild invalidates every cached feature derived from it.
+        # Do this explicitly instead of fingerprinting the .npy files.
+        rebuild_cache = True
     variant = "adv" if adversarial else "clean"
     tag = "ADV" if adversarial else "CLEAN"
     if threshold_mode not in ("fixed", "calibrated"):
@@ -224,10 +308,12 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                 if len(hit):
                     best_f1 = float(hit["TrainValF1"].iloc[0])
         else:
+            t_phase = time.perf_counter()
             best_f1 = train_model(language=language, epochs=epochs,
                                   batch_size=batch_size,
                                   learning_rate=learning_rate,
                                   adversarial=adversarial, seed=seed)
+            training_s += time.perf_counter() - t_phase
             shutil.copyfile(ckpt_canon, seed_ckpt)
             shutil.copyfile(scaler_canon, seed_scaler)
             if os.path.exists(f"{ckpt_canon}.json"):
@@ -254,7 +340,10 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                 "ThresholdMode": threshold_mode, "TrainValF1": best_f1,
                 "Acc": res["Acc"], "Prec": res["Prec"], "Rec": res["Rec"],
                 "F1": res["F1"], "ROC": res["ROC"], "FPR": res["FPR"],
+                "Tokens": res.get("Tokens", 0),
                 "Latency_ms": res["Latency_ms"], "Throughput": res["Throughput"],
+                "FilesPerSec": res.get("FilesPerSec", 0.0),
+                "MsPerToken": res.get("MsPerToken", 0.0),
                 "PeakRAM_MB": res.get("PeakRAM_MB", 0.0), "N": res["N"],
             })
 
@@ -262,6 +351,9 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
         if threshold is not None:
             seed_threshold = float(threshold)
             print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} (forced via --threshold)")
+        elif threshold_mode == "fixed":
+            seed_threshold = 0.50
+            print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} (fixed)")
         elif os.path.exists(f"{seed_ckpt}.json"):
             try:
                 with open(f"{seed_ckpt}.json", "r", encoding="utf-8") as fh:
@@ -271,24 +363,26 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                 seed_threshold = compute_seed_threshold(
                     language, adversarial=adversarial, fallback=0.50, prior=eval_prior)
                 print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} (clean-val calibrated)")
-        elif threshold_mode == "calibrated":
+        else:
             seed_threshold = compute_seed_threshold(
                 language, adversarial=adversarial, fallback=0.50,
                 prior=eval_prior)
             print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} "
                   f"(clean-val calibrated; eval prior {eval_prior:.4f})")
-        else:
-            seed_threshold = 0.50
-            print(f"[i] Seed {seed} threshold: {seed_threshold:.4f} (fixed)")
         thresholds[str(seed)] = seed_threshold
 
+        t_phase = time.perf_counter()
         _row("Clean Test", evaluate_model(language=language, batch_size=batch_size,
                                           adversarial=adversarial,
                                           threshold=seed_threshold))
+        dt = time.perf_counter() - t_phase
+        clean_eval_s += dt
+        eval_s += dt
 
         for scenario, name, layer, mode, fn, attack_all in _attack_suites(
                 language, base_seed, target,
                 force_full=(attack_eval == "full")):
+            t_phase = time.perf_counter()
             _restore()
             res = run_attack_evaluation(
                 language, name, fn, batch_size, None, base_seed,
@@ -297,12 +391,18 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                 feature_cache_dir=feature_cache_dir,
                 rebuild_cache=rebuild_cache,
                 threshold=seed_threshold)
+            dt = time.perf_counter() - t_phase
+            attack_eval_s += dt
+            eval_s += dt
             if res is None:
                 continue
             _row(scenario, {"Acc": res["accuracy"], "Prec": res["precision"],
                             "Rec": res["recall"], "F1": res["f1"], "ROC": res["auc"],
-                            "FPR": res["fpr"], "Latency_ms": res["Latency_ms"],
+                            "FPR": res["fpr"], "Tokens": res.get("Tokens", 0),
+                            "Latency_ms": res["Latency_ms"],
                             "Throughput": res["Throughput"],
+                            "FilesPerSec": res.get("FilesPerSec", 0.0),
+                            "MsPerToken": res.get("MsPerToken", 0.0),
                             "PeakRAM_MB": res.get("PeakRAM_MB", 0.0),
                             "N": len(res["labels"])})
             # I free the suite result here because it carries full feature
@@ -316,6 +416,7 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
         del fn
 
         if not skip_external:
+            t_phase = time.perf_counter()
             _restore()
             ext_results = run_external(language=language, suite="all",
                                        batch_size=batch_size,
@@ -325,6 +426,9 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                                        rebuild_cache=rebuild_cache)
             for scenario, res in ext_results.items():
                 _row(scenario, res)
+            dt = time.perf_counter() - t_phase
+            external_eval_s += dt
+            eval_s += dt
             del ext_results
             gc.collect()
             if torch.cuda.is_available():
@@ -346,6 +450,9 @@ def run_language(language, seeds, adversarial=False, epochs=100, batch_size=None
                        "eval_prior": eval_prior,
                        "thresholds": thresholds}, fh, indent=2)
         print(f"[i] Wrote per-seed thresholds -> {thr_path}")
+    _write_timing(out_csv, language, variant, seeds, df_all,
+                  time.perf_counter() - t_run_start, training_s, eval_s,
+                  data_s, clean_eval_s, attack_eval_s, external_eval_s)
     return df_all
 
 
@@ -386,7 +493,8 @@ if __name__ == "__main__":
                         choices=["fixed", "calibrated"],
                         help="'calibrated' (default) = validation-optimal cut; 'fixed' = 0.50")
     parser.add_argument("--rebuild-data", action="store_true",
-                        help="Force re-extracting .npy feature files via main.py")
+                        help="Force re-extracting .npy feature files via main.py "
+                             "(also rebuilds the derived feature caches)")
     parser.add_argument("--attack-eval", type=str, default="full",
                         choices=["isolated", "full"],
                         help="'full' (default) = recompute every block under each "
@@ -422,9 +530,11 @@ if __name__ == "__main__":
     # original uncached path byte-for-byte.
     feature_cache_dir = None if args.no_feature_cache else args.cache_dir
     # Never overwrite the paper-faithful fixed-0.50 table with the
-    # calibrated secondary table.
+    # calibrated secondary table, and keep isolated/full evaluation separate.
+    thr_suffix = "" if args.threshold_mode == "fixed" else "_calibrated"
+    atk_suffix = "" if args.attack_eval == "isolated" else "_fullmodel"
     for lang in langs:
-        out_csv = f"five_seed_{lang}_{variant}.csv"
+        out_csv = f"five_seed_{lang}_{variant}{thr_suffix}{atk_suffix}.csv"
         df_all = run_language(lang, seeds, adversarial=args.adversarial,
                               epochs=args.epochs, batch_size=args.batch_size,
                               learning_rate=args.learning_rate,
@@ -438,7 +548,9 @@ if __name__ == "__main__":
                               attack_eval=args.attack_eval,
                               rebuild_data=args.rebuild_data)
         summary = summarize(df_all[df_all["Language"] == lang])
-        summary.to_csv(f"five_seed_{lang}_{variant}_summary.csv", index=False)
+        summary.to_csv(
+            f"five_seed_{lang}_{variant}{thr_suffix}{atk_suffix}_summary.csv",
+            index=False)
 
         if args.upload:
             # I require an explicit repo and never default to a personal

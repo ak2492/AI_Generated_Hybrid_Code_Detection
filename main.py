@@ -8,6 +8,7 @@ from tqdm.auto import tqdm
 from data_loader import load_code_data
 from semantic_extractor import SemanticExtractor
 from statistical_extractor import StatisticalExtractor
+from token_metrics import count_tokens_batch
 from authorship_python import extract_python_authorship as extract_python
 from authorship_java import extract_java_authorship as extract_java
 from authorship_cpp import extract_cpp_authorship as extract_cpp
@@ -33,6 +34,8 @@ def run_extraction(language="python", split="train", limit=None, sem_batch=64, s
         auth_parser = extract_cpp
         
     all_sem, all_stat = [], []
+    token_counts = count_tokens_batch(codes, language)
+    n_tokens = int(sum(token_counts))
 
     # I time each extraction phase like CPG cost reporting so both folders
     # expose the same timing information.
@@ -76,14 +79,17 @@ def run_extraction(language="python", split="train", limit=None, sem_batch=64, s
     if split == "train" and adversarial:
         np.save(f"{language}_{split}_adv_X.npy", X)
         np.save(f"{language}_{split}_adv_y.npy", y)
+        np.save(f"{language}_{split}_adv_tokens.npy", np.asarray(token_counts, dtype=np.int64))
     else:
         np.save(f"{language}_{split}_X.npy", X)
         np.save(f"{language}_{split}_y.npy", y)
+        np.save(f"{language}_{split}_tokens.npy", np.asarray(token_counts, dtype=np.int64))
     total_extract = time.perf_counter() - t_extract_start
     throughput = len(codes) / max(1e-6, total_extract)
+    tokens_per_sec = n_tokens / max(1e-6, total_extract)
     print(f"Extraction complete for {split}. Array shape: {X.shape}")
     print(f"  Timing  -> CodeT5+: {t_sem:.1f}s | CodeBERT: {t_stat:.1f}s | AST: {t_auth:.1f}s | Total: {total_extract:.1f}s")
-    print(f"  Throughput: {throughput:.2f} samples/sec over {len(codes)} samples")
+    print(f"  Throughput: {throughput:.2f} files/sec | {tokens_per_sec:.2f} source-tokens/sec over {len(codes)} files / {n_tokens} tokens")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

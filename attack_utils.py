@@ -14,7 +14,6 @@ Key design decisions:
     adversarial distribution shift (Paper Sec 4.7).
 """
 
-import hashlib
 import os
 import sys
 import warnings
@@ -57,6 +56,7 @@ import tree_sitter_java as tsjava
 import tree_sitter_cpp as tscpp
 
 from data_loader import load_code_data
+from token_metrics import count_tokens_batch
 from semantic_extractor import SemanticExtractor
 from statistical_extractor import StatisticalExtractor
 from authorship_python import extract_python_authorship
@@ -749,15 +749,6 @@ def safe_extract_authorship(code, auth_parser_fn):
 # load it and only redo the cheap per-seed scaling + inference.
 
 
-def _attack_source_mtime(language):
-    # Fingerprint the clean .npy bundle too: a re-extraction (new main.py
-    # run) changes the clean features that isolated suites reuse.
-    try:
-        return int(os.path.getmtime(f"{language}_test_X.npy"))
-    except OSError:
-        return 0
-
-
 def attack_feature_cache_path(language, attack_name, mode, target, base_seed,
                               limit, cache_dir=".", attack_layer="full"):
     lim = "full" if limit is None else f"lim{limit}"
@@ -766,58 +757,45 @@ def attack_feature_cache_path(language, attack_name, mode, target, base_seed,
 
 
 def save_cached_attack_features(path, feat):
-    dir_name = os.path.dirname(path) or "."
-    base_name = os.path.basename(path)
-    import re
-    stem = re.sub(r'_(m\d+|h[0-9a-f]{6,}).*$', '', base_name.split(".npz")[0])
-    import glob
-    existing = glob.glob(os.path.join(dir_name, f"{stem}*.npz"))
-    if existing:
-        print(f"  [cache] already exists at {existing[0]}; skipping save.")
-        return
+    # The caller only reaches this when the exact cache is missing or a
+    # rebuild was requested, so overwrite unconditionally. Old fingerprinted
+    # cache names are never read and therefore cannot shadow this file.
     np.savez_compressed(path, sem=feat["sem_feature"], stat=feat["stat_feature"],
-                        auth=feat["auth_feature"], labels=feat["labels"])
+                        auth=feat["auth_feature"], labels=feat["labels"],
+                        tokens=feat.get("tokens", np.zeros(len(feat["labels"]), dtype=np.int64)))
     print(f"  Cached attack features -> {path} (later seeds skip extraction)")
 
 
 def load_cached_attack_features(path):
-    candidates = []
-    if os.path.exists(path):
-        candidates.append(path)
-
-    dir_name = os.path.dirname(path) or "."
-    base_name = os.path.basename(path)
-    import re
-    stem = re.sub(r'_(m\d+|h[0-9a-f]{6,}).*$', '', base_name.split(".npz")[0])
-    import glob
-    for match in glob.glob(os.path.join(dir_name, f"{stem}*.npz")):
-        if match not in candidates:
-            candidates.append(match)
-
-    for candidate in candidates:
-        try:
-            z = np.load(candidate, allow_pickle=False)
-        except (OSError, ValueError):
-            continue
-        try:
+    # Load only the exact stable path. No globbing of old fingerprinted names:
+    # `git pull` must not change which cache is used, and --rebuild-cache must
+    # actually replace the file the next run will read.
+    if not os.path.exists(path):
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as z:
             sem, stat, auth, labels = z["sem"], z["stat"], z["auth"], z["labels"]
-        except KeyError:
-            continue
-        # I validate shapes here because a half-written or foreign .npz must
-        # never silently poison a seed run; any mismatch forces re-extraction.
-        if sem.ndim != 2 or sem.shape[1] != 768:
-            continue
-        if stat.ndim != 2 or stat.shape[1] != 7:
-            continue
-        if auth.ndim != 2 or auth.shape[1] != 38:
-            continue
-        if not (sem.shape[0] == stat.shape[0] == auth.shape[0] == labels.shape[0]):
-            continue
-        print(f"  Loaded cached attack features from {candidate} (no re-extraction)")
-        return {"sem_feature": sem, "stat_feature": stat, "auth_feature": auth,
-                "labels": labels, "X": np.hstack((sem, stat, auth)),
-                "t_attack": 0.0, "t_sem": 0.0, "t_stat": 0.0, "t_auth": 0.0}
-    return None
+            tokens = z["tokens"] if "tokens" in z else None
+    except (OSError, ValueError, KeyError):
+        return None
+    # I validate shapes here because a half-written or foreign .npz must
+    # never silently poison a seed run; any mismatch forces re-extraction.
+    if sem.ndim != 2 or sem.shape[1] != 768:
+        return None
+    if stat.ndim != 2 or stat.shape[1] != 7:
+        return None
+    if auth.ndim != 2 or auth.shape[1] != 38:
+        return None
+    if not (sem.shape[0] == stat.shape[0] == auth.shape[0] == labels.shape[0]):
+        return None
+    if tokens is None or tokens.shape[0] != labels.shape[0]:
+        # Old caches predate token accounting; re-extract rather than report
+        # a fake zero-token throughput.
+        return None
+    print(f"  Loaded cached attack features from {path} (no re-extraction)")
+    return {"sem_feature": sem, "stat_feature": stat, "auth_feature": auth,
+            "labels": labels, "tokens": tokens, "X": np.hstack((sem, stat, auth)),
+            "t_attack": 0.0, "t_sem": 0.0, "t_stat": 0.0, "t_auth": 0.0}
 
 
 # =========================================================================
@@ -983,11 +961,14 @@ def extract_attack_features(language, attack_name, apply_attack_fn,
 
     # ---- 4. Assemble feature matrix [sem_768 | stat_7 | auth_38] = 813 ----
     X = np.hstack((sem_feature, stat_feature, auth_feature))
+    token_counts = np.asarray(count_tokens_batch(attacked, language), dtype=np.int64)
     print(f"  Feature matrix assembled: {X.shape} (isolated={is_isolated})")
+    print(f"  Source tokens in evaluated code: {int(token_counts.sum())}")
 
     return {
         "sem_feature": sem_feature, "stat_feature": stat_feature,
         "auth_feature": auth_feature, "labels": labels, "X": X,
+        "tokens": token_counts,
         "t_attack": t_attack, "t_sem": t_sem, "t_stat": t_stat,
         "t_auth": t_auth,
     }
@@ -1006,6 +987,8 @@ def score_attack_features(feat, language, attack_name, mode="enhanced",
     threshold = 0.50 if threshold is None else float(threshold)
     X = feat["X"]
     labels = feat["labels"]
+    token_counts = feat.get("tokens")
+    n_tokens = int(np.asarray(token_counts).sum()) if token_counts is not None else 0
     t_attack = feat.get("t_attack", 0.0)
     t_sem = feat.get("t_sem", 0.0)
     t_stat = feat.get("t_stat", 0.0)
@@ -1039,15 +1022,21 @@ def score_attack_features(feat, language, attack_name, mode="enhanced",
     model.eval()
 
     rss_before_inf = current_rss_mb()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t_inf_start = time.perf_counter()
     with torch.no_grad():
         probs = model(torch.FloatTensor(X_scaled).to(device)).cpu().numpy().flatten()
         preds = (probs >= threshold).astype(int)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     inf_duration = time.perf_counter() - t_inf_start
     peak_ram_mb = max(rss_start, rss_before_inf, current_rss_mb())
     n_samples = len(labels)
     latency_ms = (inf_duration / n_samples) * 1000.0 if n_samples else 0.0
-    throughput = n_samples / max(1e-6, inf_duration)
+    files_per_sec = n_samples / max(1e-6, inf_duration)
+    tokens_per_sec = n_tokens / max(1e-6, inf_duration)
+    ms_per_token = (inf_duration / n_tokens) * 1000.0 if n_tokens else 0.0
     total_time = time.perf_counter() - t_total_start
 
     # ---- 6. Metrics -------------------------------------------------------
@@ -1073,7 +1062,7 @@ def score_attack_features(feat, language, attack_name, mode="enhanced",
     print(f"  Probability distribution (diagnostic):")
     print(f"    Human   → mean={probs[hm].mean():.4f}  std={probs[hm].std():.4f}  predicted-machine={float((probs[hm] >= threshold).mean()):.4f}")
     print(f"    Machine → mean={probs[mm].mean():.4f}  std={probs[mm].std():.4f}  predicted-machine={float((probs[mm] >= threshold).mean()):.4f}")
-    print(f"  Cost    -> Latency: {latency_ms:.2f} ms/sample | Throughput: {throughput:.2f} samples/sec | PeakRAM: {peak_ram_mb:.2f} MB")
+    print(f"  Cost    -> Latency: {latency_ms:.2f} ms/file | Throughput: {tokens_per_sec:.2f} tokens/sec | Files: {files_per_sec:.2f}/sec | Tokens: {n_tokens} | PeakRAM: {peak_ram_mb:.2f} MB")
     print(f"  Timing  -> Attack: {t_attack:.1f}s | CodeT5+: {t_sem:.1f}s | CodeBERT: {t_stat:.1f}s | AST: {t_auth:.1f}s | Inference: {inf_duration:.2f}s | Total: {total_time:.1f}s")
     print(f"{'=' * 60}\n")
 
@@ -1083,8 +1072,9 @@ def score_attack_features(feat, language, attack_name, mode="enhanced",
         "tn": tn, "fp": fp, "fn": fn, "tp": tp,
         "probs": probs, "preds": preds, "labels": labels,
         "features": (feat["sem_feature"], feat["stat_feature"], feat["auth_feature"]),
-        "Latency_ms": latency_ms, "Throughput": throughput,
-        "PeakRAM_MB": peak_ram_mb,
+        "Tokens": n_tokens, "Latency_ms": latency_ms,
+        "Throughput": tokens_per_sec, "FilesPerSec": files_per_sec,
+        "MsPerToken": ms_per_token, "PeakRAM_MB": peak_ram_mb,
     }
 
 

@@ -24,6 +24,7 @@ from data_loader import load_code_data
 from semantic_extractor import SemanticExtractor
 from statistical_extractor import StatisticalExtractor
 from model import HybridCodeDetector
+from token_metrics import count_tokens_batch
 from attack_utils import (
     set_seed, get_language_config, get_ts_parser, get_auth_parser, safe_extract_authorship,
     strip_comments, strip_comments_enhanced,
@@ -156,25 +157,32 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 
-    def run_inference(X_matrix, scenario_name):
+    def run_inference(X_matrix, scenario_name, token_codes):
         if transductive_scaler:
             from sklearn.preprocessing import StandardScaler
             X_sc = StandardScaler().fit_transform(X_matrix)
         else:
             X_sc = scaler.transform(X_matrix)
+        n_tokens = int(sum(count_tokens_batch(token_codes, language)))
 
         # I time inference like the CPG cost helper for identical cost keys.
         rss_before = current_rss_mb()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         t_start = time.perf_counter()
         with torch.no_grad():
             tensor_X = torch.FloatTensor(X_sc).to(device)
             probs = model(tensor_X).cpu().numpy().flatten()
             preds = (probs >= 0.5).astype(int)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         inf_duration = time.perf_counter() - t_start
         peak_ram_mb = max(rss_before, current_rss_mb())
         n_samples = len(labels)
         latency_ms = (inf_duration / n_samples) * 1000.0 if n_samples else 0.0
-        throughput = n_samples / max(1e-6, inf_duration)
+        files_per_sec = n_samples / max(1e-6, inf_duration)
+        tokens_per_sec = n_tokens / max(1e-6, inf_duration)
+        ms_per_token = (inf_duration / n_tokens) * 1000.0 if n_tokens else 0.0
 
         acc = accuracy_score(labels, preds)
         f1 = f1_score(labels, preds, zero_division=0)
@@ -188,17 +196,19 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
         print(f"Accuracy:  {acc:.4f} | F1-Score: {f1:.4f} | ROC-AUC: {roc:.4f}")
         print(f"Precision: {prec:.4f} | Recall:   {rec:.4f} | FPR:     {fpr:.4f}")
         print(f"Confusion Matrix -> TN: {tn} | FP: {fp} | FN: {fn} | TP: {tp}")
-        print(f"  Cost    -> Latency: {latency_ms:.2f} ms/sample | Throughput: {throughput:.2f} samples/sec | PeakRAM: {peak_ram_mb:.2f} MB")
+        print(f"  Cost    -> Latency: {latency_ms:.2f} ms/file | Throughput: {tokens_per_sec:.2f} tokens/sec | Files: {files_per_sec:.2f}/sec | Tokens: {n_tokens} | PeakRAM: {peak_ram_mb:.2f} MB")
 
         return {"Scenario": scenario_name, "Accuracy": acc, "AUC": roc, "Precision": prec, "Recall": rec, "F1-Score": f1, "FPR": fpr,
-                "Latency_ms": latency_ms, "Throughput": throughput, "PeakRAM_MB": peak_ram_mb}
+                "Tokens": n_tokens, "Latency_ms": latency_ms, "Throughput": tokens_per_sec,
+                "FilesPerSec": files_per_sec, "MsPerToken": ms_per_token,
+                "PeakRAM_MB": peak_ram_mb}
 
     attack_all = (target == "all")
     results = []
 
     # Scenario 1: Clean State
     X_clean = np.hstack((clean_sem, clean_stat, clean_auth))
-    results.append(run_inference(X_clean, "Clean State"))
+    results.append(run_inference(X_clean, "Clean State", codes))
 
     # Scenario 2: Authorship Attack (Comment removal, others intact)
     print("\n[+] Synthesizing Authorship Attack (Strip Comments) …")
@@ -211,7 +221,7 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
             auth_attacked_codes.append(c)
     attacked_auth = np.array([safe_extract_authorship(c, auth_parser) for c in tqdm(auth_attacked_codes, desc="Parsing Authorship Attack AST", leave=True)])
     X_auth = np.hstack((clean_sem, clean_stat, attacked_auth))
-    results.append(run_inference(X_auth, "Authorship Attack"))
+    results.append(run_inference(X_auth, "Authorship Attack", auth_attacked_codes))
 
     # Scenario 3: Statistical Attack (Layout/Whitespace disruption, others intact)
     print("\n[+] Synthesizing Statistical Attack (Whitespace Disruption) …")
@@ -229,7 +239,7 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
         all_attacked_stat.append(stat_extractor.extract_batch(batch))
     attacked_stat = np.vstack(all_attacked_stat)
     X_stat = np.hstack((clean_sem, attacked_stat, clean_auth))
-    results.append(run_inference(X_stat, "Statistical Attack"))
+    results.append(run_inference(X_stat, "Statistical Attack", stat_attacked_codes))
 
     # Scenario 4: Semantic Attack (Meaning-preserving rename, others intact)
     print("\n[+] Synthesizing Semantic Attack (Variable Renaming) …")
@@ -246,7 +256,7 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
         all_attacked_sem.append(sem_extractor.extract_batch(batch))
     attacked_sem = np.vstack(all_attacked_sem)
     X_sem = np.hstack((attacked_sem, clean_stat, clean_auth))
-    results.append(run_inference(X_sem, "Semantic Attack"))
+    results.append(run_inference(X_sem, "Semantic Attack", sem_attacked_codes))
 
     # Scenario 5: Full Attack (All three layers combined)
     # I order it auth -> sem -> stat because the paper leaves order open and
@@ -272,13 +282,13 @@ def evaluate_basic_table9(language, limit, batch_size, base_seed, sem_extractor,
         all_full_stat.append(stat_extractor.extract_batch(batch))
     full_auth = np.array([safe_extract_authorship(c, auth_parser) for c in tqdm(full_attacked_codes, desc="Parsing Full Attack AST", leave=True)])
     X_full = np.hstack((np.vstack(all_full_sem), np.vstack(all_full_stat), full_auth))
-    results.append(run_inference(X_full, "Full Attack"))
+    results.append(run_inference(X_full, "Full Attack", full_attacked_codes))
 
     # Print Formatted Table 9
     print(f"\n========================================================================================")
     print(f"TABLE 9 REPRODUCTION RESULTS: [{language.upper()}] (MODE: BASIC, TARGET: {target.upper()})")
     print(f"========================================================================================")
-    print(f"{'Scenario':<22} {'Accuracy':<10} {'AUC':<10} {'Precision':<11} {'Recall':<10} {'F1-Score':<10} {'FPR':<10} {'Latency':<10} {'Thruput':<10} {'PeakRAM':<10}")
+    print(f"{'Scenario':<22} {'Accuracy':<10} {'AUC':<10} {'Precision':<11} {'Recall':<10} {'F1-Score':<10} {'FPR':<10} {'Latency':<10} {'Tok/s':<10} {'PeakRAM':<10}")
     print(f"{'-' * 118}")
     for r in results:
         print(f"{r['Scenario']:<22} {r['Accuracy']:<10.4f} {r['AUC']:<10.4f} {r['Precision']:<11.4f} {r['Recall']:<10.4f} {r['F1-Score']:<10.4f} {r['FPR']:<10.4f} {r.get('Latency_ms', 0.0):<10.2f} {r.get('Throughput', 0.0):<10.2f} {r.get('PeakRAM_MB', 0.0):<10.2f}")
@@ -344,17 +354,24 @@ def evaluate_attack(language, attack_type, mode, limit, batch_size, base_seed, s
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 
+    n_tokens = int(sum(count_tokens_batch(attacked_codes, language)))
     rss_before = current_rss_mb()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t_start = time.perf_counter()
     with torch.no_grad():
         tensor_X = torch.FloatTensor(X_scaled).to(device)
         probs = model(tensor_X).cpu().numpy().flatten()
         preds = (probs >= 0.5).astype(int)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     inf_duration = time.perf_counter() - t_start
     peak_ram_mb = max(rss_before, current_rss_mb())
     n_samples = len(labels)
     latency_ms = (inf_duration / n_samples) * 1000.0 if n_samples else 0.0
-    throughput = n_samples / max(1e-6, inf_duration)
+    files_per_sec = n_samples / max(1e-6, inf_duration)
+    tokens_per_sec = n_tokens / max(1e-6, inf_duration)
+    ms_per_token = (inf_duration / n_tokens) * 1000.0 if n_tokens else 0.0
 
     acc = accuracy_score(labels, preds)
     f1 = f1_score(labels, preds, zero_division=0)
@@ -368,7 +385,7 @@ def evaluate_attack(language, attack_type, mode, limit, batch_size, base_seed, s
     print(f"Accuracy:  {acc:.4f} | F1-Score: {f1:.4f} | ROC-AUC: {roc:.4f}")
     print(f"Precision: {prec:.4f} | Recall:   {rec:.4f} | FPR:     {fpr:.4f}")
     print(f"Confusion Matrix -> TN: {tn} | FP: {fp} | FN: {fn} | TP: {tp}")
-    print(f"  Cost    -> Latency: {latency_ms:.2f} ms/sample | Throughput: {throughput:.2f} samples/sec | PeakRAM: {peak_ram_mb:.2f} MB")
+    print(f"  Cost    -> Latency: {latency_ms:.2f} ms/file | Throughput: {tokens_per_sec:.2f} tokens/sec | Files: {files_per_sec:.2f}/sec | Tokens: {n_tokens} | PeakRAM: {peak_ram_mb:.2f} MB")
 
 
 if __name__ == "__main__":

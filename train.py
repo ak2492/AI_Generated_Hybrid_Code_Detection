@@ -44,8 +44,9 @@ def ensure_data(language, adversarial=False, rebuild=False):
     import sys
     clean_splits = ("validation", "test") if adversarial else ("train", "validation", "test")
     clean_required = [f"{language}_{split}_{kind}.npy"
-                      for split in clean_splits for kind in ("X", "y")]
-    adv_required = [f"{language}_train_adv_X.npy", f"{language}_train_adv_y.npy"]
+                      for split in clean_splits for kind in ("X", "y", "tokens")]
+    adv_required = [f"{language}_train_adv_X.npy", f"{language}_train_adv_y.npy",
+                    f"{language}_train_adv_tokens.npy"]
     required = clean_required + (adv_required if adversarial else [])
 
     missing_clean = [p for p in clean_required if not os.path.exists(p)]
